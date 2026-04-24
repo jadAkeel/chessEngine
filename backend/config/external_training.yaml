@@ -1,0 +1,20 @@
+external:
+  samples_path: data/externalSamples.npz
+  max_samples: 5000000
+  shuffle: true
+  validation_split: 0.1
+  seed: 42
+  dedup: true
+  filter_invalid: true
+  drop_zero_states: true
+  checkpoint_prefix: external
+  save_dir: models/external
+  benchmark_games: 8
+
+training:
+  batch_size: 64
+  epochs: 2
+  train_steps_per_iter: 250
+
+system:
+  checkpoint_path: models/external/external_best_model.pth

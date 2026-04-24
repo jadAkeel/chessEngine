@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.npz
+*.zst
+*.pgn
+
+backend/data/
+backend/models/*
+!backend/models/best_model.pth
+
+.env
+.vscode/

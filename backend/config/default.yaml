@@ -1,0 +1,138 @@
+model:
+  input_planes: 20
+  channels: 160
+  res_blocks: 8
+  value_dropout: 0.10
+
+
+training:
+  lr: 0.0006
+  min_lr: 0.0001
+  weight_decay: 0.0001
+  batch_size: 64
+  epochs: 2
+  train_steps_per_iter: 250
+  grad_clip: 1.0
+  value_loss_coeff: 0.75
+  entropy_coeff: 0.001
+  policy_label_smoothing: 0.01
+  use_amp: true
+  enable_horizontal_flip_augment: true
+  step_scheduler_per_batch: false
+  lr_decay_gamma: 0.995
+  external_samples_path: "data/external_samples.npz"
+  external_samples_max: 500000
+
+
+# external:
+#   samples_path: data/external_samples.npz
+#   max_samples: 500000
+#   shuffle: true
+#   validation_split: 0.1
+#   seed: 42
+#   dedup: true
+#   filter_invalid: true
+#   drop_zero_states: true
+#   checkpoint_prefix: external
+#   save_dir: models/external
+#   benchmark_games: 8
+
+
+replay:
+  capacity: 1000000
+  prioritized: false
+  alpha: 0.6
+  beta_start: 0.4
+  beta_end: 1.0
+  eps: 0.000001
+  policy_mix: 0.12
+  recent_sample_fraction: 0.8
+  recent_window_size: 500000
+  balance_outcomes: false
+  draw_value_threshold: 0.10
+  max_draw_fraction: 0.45
+  save_interval: 1
+  save_shard_size: 4096
+
+
+mcts:
+  num_simulations: 256
+  c_puct: 1.8
+  dirichlet_alpha: 0.25
+  dirichlet_eps: 0.25
+  temperature: 1.0
+  classical_value_alpha: 0.35
+  resign_threshold: -0.965
+  min_resign_plies: 60
+  inference_batch_size: 24
+  virtual_loss: 1.0
+  queen_blunder_penalty: 0.4
+  queen_hanging_penalty: 0.24
+  queen_sac_compensation_threshold: 500
+  piece_penalties:
+    PAWN:
+      blunder_penalty: 0.08
+      hanging_penalty: 0.04
+      sac_compensation_threshold: 120
+
+    KNIGHT:
+      blunder_penalty: 0.18
+      hanging_penalty: 0.09
+      sac_compensation_threshold: 200
+
+    BISHOP:
+      blunder_penalty: 0.18
+      hanging_penalty: 0.09
+      sac_compensation_threshold: 200
+
+    ROOK:
+      blunder_penalty: 0.3
+      hanging_penalty: 0.15
+      sac_compensation_threshold: 300
+
+selfplay:
+  num_workers: 6
+  games_per_worker: 7
+  max_game_length: 196
+  opening_random_plies_min: 4
+  opening_random_plies_max: 7
+  repetition_penalty: 0.4
+  repetition_break_count: 3
+  repetition_move_weight: 0.08
+  repetition_draw_value: 0.1
+  max_length_draw_value: 0.0
+  temperature_high_moves: 10
+  temperature_mid_moves: 24
+  temperature_high: 0.8
+  temperature_mid: 0.35
+  temperature_low: 0.1
+
+
+arena:
+  games: 8
+  update_threshold: 0.55
+  early_stop_margin: 0.5
+  benchmark_games: 16
+  baseline_search_depth: 8
+  elo_k_factor: 24.0
+  initial_elo: 1200.0
+  resign_threshold: -0.98
+  search_temperature: 0.2
+  max_repetition_draw_rate: 0.50
+  repetition_break_count: 3
+  repetition_soft_limit_plies: 10
+  repetition_move_weight: 0.30
+  hard_block_repetition: true
+  contempt_factor: 0.05
+  randomize_openings: true
+  fallback_top_k: 10
+
+
+system:
+  device: auto
+  log_level: INFO
+  json_logs: false
+  checkpoint_path: models/best_model.pth
+  default_bestmove_simulations: 256
+  max_halfmove: 80
+  max_fullmove: 120

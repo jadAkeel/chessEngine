@@ -1,0 +1,8 @@
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+python-chess>=1.999
+numpy>=1.26.0
+PyYAML>=6.0.1
+torch>=2.3.0
+
+zstandard>=0.23.0
