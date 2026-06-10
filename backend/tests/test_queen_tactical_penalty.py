@@ -2,7 +2,7 @@ import unittest
 
 import chess
 
-from app.infra.config import AppConfig, ArenaConfig, MCTSConfig, ModelConfig, ReplayConfig, SelfPlayConfig, SystemConfig, TrainingConfig
+from app.infra.config import AppConfig, ArenaConfig, MCTSConfig, ModelConfig, ReplayConfig, SelfPlayConfig, SystemConfig, TrainingConfig, validate
 from app.mcts.node import Node
 from app.mcts.search import MCTS
 
@@ -122,6 +122,57 @@ class GeneralPieceTacticalPenaltyTests(unittest.TestCase):
 
                 self.assertGreater(hanging_penalty, 0.01)
                 self.assertLess(safe_penalty, hanging_penalty)
+
+    def test_piece_penalty_config_overrides_scaled_queen_defaults(self):
+        cfg = self._cfg(
+            piece_penalties={
+                "ROOK": {
+                    "blunder_penalty": 0.42,
+                    "hanging_penalty": 0.21,
+                    "sac_compensation_threshold": 123,
+                }
+            }
+        )
+        mcts = MCTS(model=None, cfg=cfg, device="cpu")
+
+        rook_cfg = mcts._get_piece_penalty_cfg(chess.ROOK)
+        knight_cfg = mcts._get_piece_penalty_cfg(chess.KNIGHT)
+
+        self.assertEqual(rook_cfg["blunder_penalty"], 0.42)
+        self.assertEqual(rook_cfg["hanging_penalty"], 0.21)
+        self.assertEqual(rook_cfg["sac_compensation_threshold"], 123)
+        self.assertNotEqual(knight_cfg["blunder_penalty"], 0.42)
+
+    def test_nested_piece_penalty_validation_rejects_bad_values(self):
+        bad_negative = self._cfg(piece_penalties={"ROOK": {"hanging_penalty": -0.01}})
+        with self.assertRaisesRegex(ValueError, "mcts\\.piece_penalties\\.ROOK\\.hanging_penalty must be >= 0"):
+            validate(bad_negative)
+
+        bad_large = self._cfg(piece_penalties={"ROOK": {"blunder_penalty": 2.0}})
+        with self.assertRaisesRegex(ValueError, "mcts\\.piece_penalties\\.ROOK\\.blunder_penalty=2 is suspiciously large"):
+            validate(bad_large)
+
+    def test_penalty_diagnostics_records_triggers_and_ranking_changes(self):
+        cfg = self._cfg()
+        mcts = MCTS(model=None, cfg=cfg, device="cpu")
+        board = chess.Board("3rk3/8/8/8/8/8/8/3QK3 w - - 0 1")
+
+        hanging_move = chess.Move.from_uci("d1d7")
+        safe_move = chess.Move.from_uci("d1e2")
+        root = Node(prior=0.0)
+        root.visit_count = 4
+        root.children[hanging_move] = Node(prior=0.5, parent=root)
+        root.children[safe_move] = Node(prior=0.49, parent=root)
+
+        diagnostics = mcts._new_penalty_diagnostics()
+        selected_move, _ = mcts._select_child(root, board, diagnostics=diagnostics)
+        report = mcts._finalize_penalty_diagnostics(diagnostics)
+
+        self.assertEqual(selected_move, safe_move)
+        self.assertGreater(report["components"]["tactical"]["count"], 0)
+        self.assertGreater(report["components"]["tactical"]["avg"], 0.0)
+        self.assertGreater(report["total_move_penalty"]["max"], 0.0)
+        self.assertEqual(report["ranking_changed"], 1)
 
 
 if __name__ == "__main__":

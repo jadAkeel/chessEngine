@@ -9,6 +9,7 @@ import numpy as np
 
 from app.evaluation.metrics import evaluate_board
 from app.game.move_encoding import move_to_index
+from app.game.principles import principle_penalty_components
 from app.game.repetition import PositionKey, build_seen_positions, current_repetition_count, filter_repetition_moves, position_key
 from app.infra.config import AppConfig, get_current_config
 from app.mcts.node import Node
@@ -22,6 +23,14 @@ PIECE_VALUES = {
     chess.ROOK: 500,
     chess.QUEEN: 900,
     chess.KING: 0,
+}
+
+PIECE_CONFIG_NAMES = {
+    chess.PAWN: "PAWN",
+    chess.KNIGHT: "KNIGHT",
+    chess.BISHOP: "BISHOP",
+    chess.ROOK: "ROOK",
+    chess.QUEEN: "QUEEN",
 }
 
 
@@ -45,11 +54,24 @@ class MCTS:
             return None
 
         scale = piece_value / queen_value
-        return {
+        fallback = {
             "blunder_penalty": float(getattr(self.cfg.mcts, "queen_blunder_penalty", 0.0)) * scale,
             "hanging_penalty": float(getattr(self.cfg.mcts, "queen_hanging_penalty", 0.0)) * scale,
             "sac_compensation_threshold": float(getattr(self.cfg.mcts, "queen_sac_compensation_threshold", 0.0)) * scale,
             "check_discount": float(getattr(self.cfg.mcts, "queen_check_discount", 1.0)),
+        }
+        configured = getattr(self.cfg.mcts, "piece_penalties", {}) or {}
+        piece_name = PIECE_CONFIG_NAMES.get(piece_type, "")
+        custom = configured.get(piece_name) or configured.get(piece_name.lower()) or {}
+        if not isinstance(custom, Mapping):
+            return fallback
+        return {
+            "blunder_penalty": float(custom.get("blunder_penalty", fallback["blunder_penalty"])),
+            "hanging_penalty": float(custom.get("hanging_penalty", fallback["hanging_penalty"])),
+            "sac_compensation_threshold": float(
+                custom.get("sac_compensation_threshold", fallback["sac_compensation_threshold"])
+            ),
+            "check_discount": float(custom.get("check_discount", fallback["check_discount"])),
         }
 
     def _capture_replies_to_square(self, board: chess.Board, target_square: int) -> list[chess.Move]:
@@ -116,13 +138,14 @@ class MCTS:
         board: chess.Board,
         add_noise: bool = False,
         num_simulations: int | None = None,
-        temperature: float = 1.0,
+        temperature: float | None = None,
     ) -> dict:
         if not isinstance(board, chess.Board):
             raise TypeError("Expected board to be chess.Board")
 
         self._tactical_penalty_cache.clear()
         sims = max(1, int(num_simulations if num_simulations is not None else self.cfg.mcts.num_simulations))
+        temperature = float(self.cfg.mcts.temperature if temperature is None else temperature)
         batch_limit = max(1, int(self.cfg.mcts.inference_batch_size))
         root_seen_positions = build_seen_positions(board)
 
@@ -137,6 +160,7 @@ class MCTS:
         root = Node(prior=0.0)
         initial_root_value = self._expand_node(root, board, add_noise=add_noise)
         pending_simulations = sims
+        diagnostics = self._new_penalty_diagnostics() if self._penalty_diagnostics_enabled() else None
 
         while pending_simulations > 0:
             rollout_batch = min(batch_limit, pending_simulations)
@@ -150,7 +174,7 @@ class MCTS:
                 search_path = [node]
 
                 while node.expanded() and not self._is_terminal_board(sim_board):
-                    move, next_node = self._select_child(node, sim_board, sim_seen_positions)
+                    move, next_node = self._select_child(node, sim_board, sim_seen_positions, diagnostics=diagnostics)
                     if move is None or next_node is None:
                         break
 
@@ -203,7 +227,7 @@ class MCTS:
             best_move.uci() if best_move else None,
             root_value,
         )
-        return {
+        result = {
             "best_move": best_move,
             "visit_counts": visit_counts,
             "policy_target": raw_policy_target,
@@ -211,6 +235,9 @@ class MCTS:
             "root_repetition_counts": root_repetition_counts,
             "root_value": root_value,
         }
+        if diagnostics is not None:
+            result["penalty_diagnostics"] = self._finalize_penalty_diagnostics(diagnostics)
+        return result
 
     def _prediction_key(self, board: chess.Board) -> str:
         return board.fen(en_passant="fen")
@@ -295,12 +322,75 @@ class MCTS:
         probs = probs / total
         return {move: float(prob) for move, prob in zip(legal_moves, probs)}
 
-    def _select_child(self, node: Node, board: chess.Board, seen_positions: Mapping[PositionKey, int] | None = None):
+    def _penalty_diagnostics_enabled(self) -> bool:
+        return bool(getattr(getattr(self.cfg, "penalty_diagnostics", None), "enabled", False))
+
+    def _new_penalty_diagnostics(self) -> dict:
+        return {
+            "components": {},
+            "total": {"count": 0, "sum": 0.0, "max": 0.0},
+            "thresholds": {"gt_0.25": 0, "gt_0.5": 0, "gt_0.75": 0, "gt_1.0": 0},
+            "ranking": {"comparisons": 0, "changed": 0},
+        }
+
+    def _record_penalty_diagnostics(self, diagnostics: dict, components: Mapping[str, float]) -> None:
+        total = float(sum(float(value) for value in components.values()))
+        total_stats = diagnostics["total"]
+        total_stats["count"] += 1
+        total_stats["sum"] += total
+        total_stats["max"] = max(float(total_stats["max"]), total)
+
+        for threshold in (0.25, 0.5, 0.75, 1.0):
+            if total > threshold:
+                diagnostics["thresholds"][f"gt_{threshold}"] += 1
+
+        for name, value in components.items():
+            value = float(value)
+            if value <= 0.0:
+                continue
+            stats = diagnostics["components"].setdefault(name, {"count": 0, "sum": 0.0, "max": 0.0})
+            stats["count"] += 1
+            stats["sum"] += value
+            stats["max"] = max(float(stats["max"]), value)
+
+    def _finalize_penalty_diagnostics(self, diagnostics: dict) -> dict:
+        components = {}
+        for name, stats in diagnostics["components"].items():
+            count = int(stats["count"])
+            components[name] = {
+                "count": count,
+                "avg": float(stats["sum"]) / count if count else 0.0,
+                "max": float(stats["max"]),
+            }
+
+        total_count = int(diagnostics["total"]["count"])
+        return {
+            "components": components,
+            "total_move_penalty": {
+                "count": total_count,
+                "sum": float(diagnostics["total"]["sum"]),
+                "avg": float(diagnostics["total"]["sum"]) / total_count if total_count else 0.0,
+                "max": float(diagnostics["total"]["max"]),
+            },
+            "thresholds": dict(diagnostics["thresholds"]),
+            "ranking_changed": int(diagnostics["ranking"]["changed"]),
+            "ranking_comparisons": int(diagnostics["ranking"]["comparisons"]),
+        }
+
+    def _select_child(
+        self,
+        node: Node,
+        board: chess.Board,
+        seen_positions: Mapping[PositionKey, int] | None = None,
+        diagnostics: dict | None = None,
+    ):
         if not node.children:
             return None, None
 
         best_score = -float("inf")
+        best_raw_score = -float("inf")
         best_move = None
+        best_raw_move = None
         best_child = None
         parent_visits = max(1, node.total_visit_count)
 
@@ -308,15 +398,33 @@ class MCTS:
             q_value = -child.q
             u_value = self.c_puct * child.prior * math.sqrt(parent_visits) / (1 + child.total_visit_count)
             virtual_penalty = self.virtual_loss * float(child.virtual_visits)
-            score = q_value + u_value - virtual_penalty - self._move_penalty(board, move, seen_positions)
+            raw_score = q_value + u_value - virtual_penalty
+            if diagnostics is None:
+                move_penalty = self._move_penalty(board, move, seen_positions)
+            else:
+                components = self._move_penalty_components(board, move, seen_positions)
+                self._record_penalty_diagnostics(diagnostics, components)
+                move_penalty = float(sum(components.values()))
+            score = raw_score - move_penalty
+            if raw_score > best_raw_score:
+                best_raw_score = raw_score
+                best_raw_move = move
             if score > best_score:
                 best_score = score
                 best_move = move
                 best_child = child
 
+        if diagnostics is not None and best_move is not None and best_raw_move is not None:
+            diagnostics["ranking"]["comparisons"] += 1
+            if best_move != best_raw_move:
+                diagnostics["ranking"]["changed"] += 1
+
         return best_move, best_child
 
     def _move_penalty(self, board: chess.Board, move: chess.Move, seen_positions: Mapping[PositionKey, int] | None = None) -> float:
+        return float(sum(self._move_penalty_components(board, move, seen_positions).values()))
+
+    def _move_penalty_components(self, board: chess.Board, move: chess.Move, seen_positions: Mapping[PositionKey, int] | None = None) -> dict[str, float]:
         oscillation_penalty = self._oscillation_penalty(board, move)
         before_halfmove = int(getattr(board, "halfmove_clock", 0))
         was_capture = bool(board.is_capture(move))
@@ -324,6 +432,7 @@ class MCTS:
         mover = board.turn
         before_material = self._material_balance(board, mover)
         before_position_key = position_key(board)
+        before_board = board.copy(stack=True)
 
         board.push(move)
         try:
@@ -340,12 +449,20 @@ class MCTS:
                     move_uci=move.uci(),
                 )
 
-            return float(
-                oscillation_penalty
-                + self._repetition_penalty_in_position(board, seen_positions)
-                + self._forward_progress_penalty_after_push(board, before_halfmove, was_capture)
-                + tactical_penalty
-            )
+            principle_components = principle_penalty_components(
+                before=before_board,
+                after=board,
+                move=move,
+                cfg=self.cfg.principle_penalties,
+            ).components
+
+            return {
+                "oscillation": float(oscillation_penalty),
+                "repetition": float(self._repetition_penalty_in_position(board, seen_positions)),
+                "progress": float(self._forward_progress_penalty_after_push(board, before_halfmove, was_capture)),
+                "tactical": float(tactical_penalty),
+                **{f"principle.{name}": float(value) for name, value in principle_components.items()},
+            }
         finally:
             board.pop()
 

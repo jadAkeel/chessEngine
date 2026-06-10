@@ -59,6 +59,10 @@ class ConnectionManager:
         async with self._lock:
             self.room_fens[room_id] = fen
 
+    async def get_room_fen(self, room_id: str) -> str:
+        async with self._lock:
+            return self.room_fens.setdefault(room_id, chess.STARTING_FEN)
+
     async def broadcast(self, room_id: str, payload: dict) -> None:
         async with self._lock:
             sockets = list(self.rooms.get(room_id, set()))
@@ -319,12 +323,42 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 })
 
             elif message_type == 'move':
-                board = _validate_fen(data['fen'])
+                move_text = data.get('move')
+                if not move_text:
+                    await websocket.send_json({
+                        'type': 'error',
+                        'error': 'Move message requires a UCI move',
+                        'room_id': room_id
+                    })
+                    continue
+
+                board = chess.Board(await manager.get_room_fen(room_id))
+                try:
+                    move = chess.Move.from_uci(str(move_text))
+                except ValueError:
+                    await websocket.send_json({
+                        'type': 'error',
+                        'error': 'Invalid UCI move',
+                        'room_id': room_id
+                    })
+                    continue
+
+                if move not in board.legal_moves:
+                    await websocket.send_json({
+                        'type': 'error',
+                        'error': 'Illegal move',
+                        'room_id': room_id,
+                        'fen': board.fen()
+                    })
+                    continue
+
+                board.push(move)
 
                 await manager.update_room_fen(room_id, board.fen())
                 await manager.broadcast(room_id, {
                     'type': 'move',
                     'room_id': room_id,
+                    'move': move.uci(),
                     'fen': board.fen()
                 })
 

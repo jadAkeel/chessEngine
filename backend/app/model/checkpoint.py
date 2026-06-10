@@ -181,7 +181,7 @@ def load_checkpoint(
         raise CheckpointLoadError(f"Checkpoint state dict missing or invalid: {path}")
 
     try:
-        model.load_state_dict(state, strict=True)
+        model.load_state_dict(state, strict=False)
     except RuntimeError as exc:
         raise CheckpointLoadError(f"Checkpoint incompatible with model for {path}: {exc}") from exc
 

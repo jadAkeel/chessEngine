@@ -24,14 +24,18 @@ class AnalysisResult:
     score: float
     visit_counts: dict[str, int]
     policy: dict[str, float]
+    penalty_diagnostics: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "best_move": self.best_move.uci() if self.best_move is not None else None,
             "score": self.score,
             "visit_counts": dict(self.visit_counts),
             "policy": dict(self.policy),
         }
+        if self.penalty_diagnostics is not None:
+            payload["penalty_diagnostics"] = dict(self.penalty_diagnostics)
+        return payload
 
 
 class Engine:
@@ -154,6 +158,7 @@ class Engine:
             score=float(result["root_value"]),
             visit_counts={move.uci(): int(count) for move, count in result["visit_counts"].items()},
             policy={move.uci(): float(prob) for move, prob in effective_policy.items()},
+            penalty_diagnostics=result.get("penalty_diagnostics"),
         )
 
         if cache_key is not None:

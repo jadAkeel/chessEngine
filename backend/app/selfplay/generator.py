@@ -107,6 +107,70 @@ def _top_policy_moves(policy_dict: dict[chess.Move, float] | None, top_k: int = 
     return [(move.uci(), float(round(prob, 4))) for move, prob in top_moves]
 
 
+def _empty_penalty_diagnostics() -> dict:
+    return {
+        "components": {},
+        "total_move_penalty": {"count": 0, "sum": 0.0, "max": 0.0},
+        "thresholds": {"gt_0.25": 0, "gt_0.5": 0, "gt_0.75": 0, "gt_1.0": 0},
+        "ranking_changed": 0,
+        "ranking_comparisons": 0,
+    }
+
+
+def _merge_penalty_diagnostics(target: dict, update: dict | None) -> None:
+    if not update:
+        return
+
+    total = update.get("total_move_penalty", {})
+    target_total = target["total_move_penalty"]
+    target_total["count"] += int(total.get("count", 0))
+    target_total["sum"] += float(total.get("sum", 0.0))
+    target_total["max"] = max(float(target_total["max"]), float(total.get("max", 0.0)))
+
+    for name, stats in (update.get("components") or {}).items():
+        count = int(stats.get("count", 0))
+        avg = float(stats.get("avg", 0.0))
+        component = target["components"].setdefault(name, {"count": 0, "sum": 0.0, "max": 0.0})
+        component["count"] += count
+        component["sum"] += avg * count
+        component["max"] = max(float(component["max"]), float(stats.get("max", 0.0)))
+
+    for name, count in (update.get("thresholds") or {}).items():
+        target["thresholds"][name] = int(target["thresholds"].get(name, 0)) + int(count)
+
+    target["ranking_changed"] += int(update.get("ranking_changed", 0))
+    target["ranking_comparisons"] += int(update.get("ranking_comparisons", 0))
+
+
+def _finalize_penalty_diagnostics(stats: dict, *, games: int | None = None) -> dict:
+    components = {}
+    for name, component in stats["components"].items():
+        count = int(component["count"])
+        components[name] = {
+            "count": count,
+            "avg": float(component["sum"]) / count if count else 0.0,
+            "max": float(component["max"]),
+        }
+
+    total = stats["total_move_penalty"]
+    total_count = int(total["count"])
+    result = {
+        "components": components,
+        "total_move_penalty": {
+            "count": total_count,
+            "sum": float(total["sum"]),
+            "avg": float(total["sum"]) / total_count if total_count else 0.0,
+            "max": float(total["max"]),
+        },
+        "thresholds": dict(stats["thresholds"]),
+        "ranking_changed": int(stats["ranking_changed"]),
+        "ranking_comparisons": int(stats["ranking_comparisons"]),
+    }
+    if games is not None:
+        result["avg_total_penalty_per_game"] = float(total["sum"]) / max(1, int(games))
+    return result
+
+
 def _terminal_value_from_result(winner: bool | None) -> float:
     if winner is None:
         return 0.0
@@ -131,6 +195,7 @@ def _play_single_game(engine: Engine, cfg: AppConfig, logger=None, game_label: s
     move_history: list[str] = []
     value_history: list[float] = []
     policy_top3_history: list[list[tuple[str, float]]] = []
+    penalty_diagnostics = _empty_penalty_diagnostics() if cfg.penalty_diagnostics.enabled else None
     random_opening_plies = random.randint(cfg.selfplay.opening_random_plies_min, cfg.selfplay.opening_random_plies_max)
     winner = None
     custom_terminal_value: float | None = None
@@ -229,10 +294,29 @@ def _play_single_game(engine: Engine, cfg: AppConfig, logger=None, game_label: s
         top3 = _top_policy_moves(filtered_policy_dict, top_k=3)
         move = _sample_move(filtered_policy_dict, best_move) if ply < random_opening_plies else best_move
         root_value = float(search.get("root_value", 0.0))
+        if penalty_diagnostics is not None:
+            _merge_penalty_diagnostics(penalty_diagnostics, search.get("penalty_diagnostics"))
 
         if move is None:
             termination_reason = "no_move_from_search"
             termination_detail = {
+                "root_value": root_value,
+                "policy_size": len(filtered_policy_dict) if filtered_policy_dict is not None else 0,
+                "policy_top3": top3,
+                "repetition_candidates": repetition_candidates,
+                "last_moves": move_history[-10:],
+                "last_values": [round(v, 4) for v in value_history[-10:]],
+                "last_policy_top3": policy_top3_history[-5:],
+                "max_repeat": int(max(seen_positions.values(), default=0)),
+                "unique_positions": int(len(seen_positions)),
+                **_describe_board_state(board),
+            }
+            break
+
+        if move not in board.legal_moves:
+            termination_reason = "illegal_move_from_search"
+            termination_detail = {
+                "move": move.uci(),
                 "root_value": root_value,
                 "policy_size": len(filtered_policy_dict) if filtered_policy_dict is not None else 0,
                 "policy_top3": top3,
@@ -353,6 +437,8 @@ def _play_single_game(engine: Engine, cfg: AppConfig, logger=None, game_label: s
         "unique_positions": int(unique_positions),
         "custom_terminal_value_white": None if custom_terminal_value is None else float(custom_terminal_value),
     }
+    if penalty_diagnostics is not None:
+        meta["penalty_diagnostics"] = _finalize_penalty_diagnostics(penalty_diagnostics, games=1)
 
     if logger is not None:
         logger.info(
@@ -394,6 +480,7 @@ def generate_self_play_data(model, device="cpu", num_workers=None, games_per_wor
     max_repeats = []
     unique_positions_list = []
     reason_counts = Counter()
+    penalty_diagnostics = _empty_penalty_diagnostics() if cfg.penalty_diagnostics.enabled else None
     use_mp = workers > 1
 
     configure_torch_runtime(cfg, device=str(device), role='selfplay_main', worker_count=workers)
@@ -426,6 +513,8 @@ def generate_self_play_data(model, device="cpu", num_workers=None, games_per_wor
                 max_repeats.append(meta.get("max_repeat", 0))
                 unique_positions_list.append(meta.get("unique_positions", 0))
                 reason_counts[meta.get("termination_reason", "unknown")] += 1
+                if penalty_diagnostics is not None:
+                    _merge_penalty_diagnostics(penalty_diagnostics, meta.get("penalty_diagnostics"))
                 logger.info(
                     "selfplay completed=%s/%s samples=%s last_plies=%s last_elapsed=%.2fs last_reason=%s last_max_repeat=%s last_unique_positions=%s last_moves=%s last_values=%s",
                     completed_games,
@@ -451,9 +540,26 @@ def generate_self_play_data(model, device="cpu", num_workers=None, games_per_wor
             max_repeats.append(meta.get("max_repeat", 0))
             unique_positions_list.append(meta.get("unique_positions", 0))
             reason_counts[meta.get("termination_reason", "unknown")] += 1
+            if penalty_diagnostics is not None:
+                _merge_penalty_diagnostics(penalty_diagnostics, meta.get("penalty_diagnostics"))
 
     unique_openings = len(set(openings)) if openings else 0
     opening_diversity = unique_openings / len(openings) if openings else 0.0
+    draw_reasons = {
+        "manual_threefold_repetition_break",
+        "official_termination.threefold_repetition",
+        "official_termination.fivefold_repetition",
+    }
+    draw_count = sum(
+        count
+        for reason, count in reason_counts.items()
+        if "draw" in str(reason) or reason in draw_reasons or str(reason).endswith("stalemate")
+    )
+    repetition_draw_count = sum(
+        count
+        for reason, count in reason_counts.items()
+        if "repetition" in str(reason)
+    )
     stats = {
         "games": total_games,
         "workers": workers,
@@ -464,8 +570,12 @@ def generate_self_play_data(model, device="cpu", num_workers=None, games_per_wor
         "avg_repeated_positions": float(np.mean(repeated)) if repeated else 0.0,
         "avg_max_repeat": float(np.mean(max_repeats)) if max_repeats else 0.0,
         "avg_unique_positions": float(np.mean(unique_positions_list)) if unique_positions_list else 0.0,
+        "draw_rate": float(draw_count / max(1, total_games)),
+        "repetition_draw_frequency": float(repetition_draw_count / max(1, total_games)),
         "termination_reasons": dict(reason_counts),
     }
+    if penalty_diagnostics is not None:
+        stats["penalty_diagnostics"] = _finalize_penalty_diagnostics(penalty_diagnostics, games=total_games)
     logger.info(
         "selfplay done games=%s workers=%s samples=%s avg_len=%.2f avg_repeats=%.2f avg_max_repeat=%.2f avg_unique_positions=%.2f reasons=%s",
         stats["games"],
@@ -477,4 +587,6 @@ def generate_self_play_data(model, device="cpu", num_workers=None, games_per_wor
         stats["avg_unique_positions"],
         stats["termination_reasons"],
     )
+    if cfg.penalty_diagnostics.enabled:
+        logger.info("penalty diagnostics=%s", stats.get("penalty_diagnostics", {}))
     return all_samples, stats

@@ -1,12 +1,51 @@
+# Python bytecode and caches
 __pycache__/
-*.pyc
-*.npz
-*.zst
-*.pgn
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-backend/data/
-backend/models/*
-!backend/models/best_model.pth
+# Virtual environments
+.venv/
+venv/
+env/
 
+# Node / frontend
+node_modules/
+dist/
+build/
+
+# Environment and local secrets
 .env
+.env.*
+!.env.example
+
+# OS/editor
+.DS_Store
+Thumbs.db
 .vscode/
+.idea/
+
+# Runtime / logs
+*.log
+*.tmp
+*.temp
+tempCodeRunnerFile.py
+*_tmp.yaml
+
+# Training data, generated model artifacts, checkpoints, and replay buffers
+backend/data/
+backend/models/
+backend/checkpoints/
+**/replay_buffer*/
+**/replay_buffer.d/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.pkl
+*.pickle
+*.npz
+*.npy

@@ -19,7 +19,7 @@ from app.infra.runtime import configure_torch_runtime
 from app.model.checkpoint import load_checkpoint, save_checkpoint
 from app.model.network import ChessNet
 from app.selfplay.generator import generate_self_play_data
-from app.training.external_samples import load_external_samples
+from app.training.external_samples import load_external_samples_sharded
 from app.training.replay_buffer import ReplayBuffer
 from app.training.trainer import train_model
 
@@ -98,7 +98,7 @@ def _prefill_replay_buffer_from_external(replay_buffer: ReplayBuffer, cfg, logge
     added_count = 0
     deduped_count = 0
 
-    for state, policy, value in load_external_samples(external_path, cfg, max_samples=external_max):
+    for state, policy, value in load_external_samples_sharded(external_path, cfg, max_samples=external_max):
         loaded_count += 1
         before_len = len(replay_buffer)
         replay_buffer.add(state, policy, value)

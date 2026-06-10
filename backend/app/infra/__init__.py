@@ -1,6 +1,8 @@
 from app.infra.config import (
     AppConfig,
     Config,
+    PenaltyDiagnosticsConfig,
+    PrinciplePenaltiesConfig,
     apply_overrides,
     config_as_dict,
     config_to_dict,
@@ -15,6 +17,8 @@ from app.infra.logging import setup_logging
 __all__ = [
     'AppConfig',
     'Config',
+    'PenaltyDiagnosticsConfig',
+    'PrinciplePenaltiesConfig',
     'load_config',
     'apply_overrides',
     'config_as_dict',
