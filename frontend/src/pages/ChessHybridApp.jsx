@@ -151,6 +151,9 @@ export default function ChessHybridApp() {
         if (data.type === "init" || data.type === "move") {
           gameRef.current.load(data.fen);
           syncGame();
+        } else if (data.type === "error" && data.fen) {
+          gameRef.current.load(data.fen);
+          syncGame();
         }
       };
 
@@ -174,6 +177,10 @@ export default function ChessHybridApp() {
   function syncGame() {
     setFen(game.fen());
     setMoveHistory([...game.history()]);
+  }
+
+  function moveToUci(move) {
+    return `${move.from}${move.to}${move.promotion || ""}`;
   }
 
   function highlightLastMove(from, to) {
@@ -287,7 +294,7 @@ export default function ChessHybridApp() {
       syncGame();
 
       if (isMultiplayer) {
-         wsRef.current?.send(JSON.stringify({ type: "move", fen: game.fen() }));
+         wsRef.current?.send(JSON.stringify({ type: "move", move: moveToUci(move) }));
       } else {
          window.setTimeout(maybePlayEngine, 250);
       }
@@ -314,7 +321,7 @@ export default function ChessHybridApp() {
       syncGame();
       
       if (isMultiplayer) {
-         wsRef.current?.send(JSON.stringify({ type: "move", fen: game.fen() }));
+         wsRef.current?.send(JSON.stringify({ type: "move", move: moveToUci(move) }));
       } else {
          window.setTimeout(maybePlayEngine, 250);
       }
@@ -375,7 +382,7 @@ export default function ChessHybridApp() {
         syncGame();
 
         if (isMultiplayer) {
-          wsRef.current?.send(JSON.stringify({ type: "move", fen: game.fen() }));
+          wsRef.current?.send(JSON.stringify({ type: "move", move: moveToUci(move) }));
         } else {
           window.setTimeout(maybePlayEngine, 250);
         }

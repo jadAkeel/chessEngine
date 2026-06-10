@@ -6,9 +6,73 @@ from collections import Counter
 import chess
 
 from app.core.engine import Engine
+from app.evaluation.benchmark import find_best_move
 from app.game.repetition import PositionKey, count_repetition_after_move, filter_repetition_moves, position_key
 from app.infra.config import AppConfig, get_current_config
 from app.infra.logging import setup_logging
+
+
+def _empty_penalty_diagnostics() -> dict:
+    return {
+        'components': {},
+        'total_move_penalty': {'count': 0, 'sum': 0.0, 'max': 0.0},
+        'thresholds': {'gt_0.25': 0, 'gt_0.5': 0, 'gt_0.75': 0, 'gt_1.0': 0},
+        'ranking_changed': 0,
+        'ranking_comparisons': 0,
+    }
+
+
+def _merge_penalty_diagnostics(target: dict, update: dict | None) -> None:
+    if not update:
+        return
+
+    total = update.get('total_move_penalty', {})
+    target_total = target['total_move_penalty']
+    target_total['count'] += int(total.get('count', 0))
+    target_total['sum'] += float(total.get('sum', 0.0))
+    target_total['max'] = max(float(target_total['max']), float(total.get('max', 0.0)))
+
+    for name, stats in (update.get('components') or {}).items():
+        count = int(stats.get('count', 0))
+        avg = float(stats.get('avg', 0.0))
+        component = target['components'].setdefault(name, {'count': 0, 'sum': 0.0, 'max': 0.0})
+        component['count'] += count
+        component['sum'] += avg * count
+        component['max'] = max(float(component['max']), float(stats.get('max', 0.0)))
+
+    for name, count in (update.get('thresholds') or {}).items():
+        target['thresholds'][name] = int(target['thresholds'].get(name, 0)) + int(count)
+
+    target['ranking_changed'] += int(update.get('ranking_changed', 0))
+    target['ranking_comparisons'] += int(update.get('ranking_comparisons', 0))
+
+
+def _finalize_penalty_diagnostics(stats: dict, *, games: int) -> dict:
+    components = {}
+    for name, component in stats['components'].items():
+        count = int(component['count'])
+        components[name] = {
+            'count': count,
+            'avg': float(component['sum']) / count if count else 0.0,
+            'max': float(component['max']),
+        }
+
+    total = stats['total_move_penalty']
+    total_count = int(total['count'])
+    return {
+        'components': components,
+        'total_move_penalty': {
+            'count': total_count,
+            'sum': float(total['sum']),
+            'avg': float(total['sum']) / total_count if total_count else 0.0,
+            'max': float(total['max']),
+        },
+        'thresholds': dict(stats['thresholds']),
+        'ranking_changed': int(stats['ranking_changed']),
+        'ranking_comparisons': int(stats['ranking_comparisons']),
+        'ranking_change_rate': float(stats['ranking_changed']) / max(1, int(stats['ranking_comparisons'])),
+        'avg_total_penalty_per_game': float(total['sum']) / max(1, int(games)),
+    }
 
 
 def _winner_label(winner: bool | None) -> str | None:
@@ -175,7 +239,7 @@ def _select_move_with_fallback(
 
     visit_counts = analysis.visit_counts
     if not visit_counts:
-        return None, analysis.score, {}
+        return None, analysis.score, {}, analysis.penalty_diagnostics
 
     policy_dict = {
         chess.Move.from_uci(move_uci): float(analysis.policy.get(move_uci, 0.0))
@@ -206,7 +270,7 @@ def _select_move_with_fallback(
         reverse=True,
     )
     if not ranked_moves:
-        return None, analysis.score, repetition_counts
+        return None, analysis.score, repetition_counts, analysis.penalty_diagnostics
 
     top_k = max(1, int(getattr(cfg.arena, 'fallback_top_k', 3)))
     candidates = ranked_moves[:top_k]
@@ -230,7 +294,7 @@ def _select_move_with_fallback(
 
     chosen_pool = preferred or fallback or [ranked_moves[0][0]]
     chosen_uci = chosen_pool[0]
-    return chess.Move.from_uci(chosen_uci), analysis.score, repetition_counts
+    return chess.Move.from_uci(chosen_uci), analysis.score, repetition_counts, analysis.penalty_diagnostics
 
 
 def _play_engine_game(
@@ -245,6 +309,7 @@ def _play_engine_game(
     plies = 0
     last_value = None
     move_history: list[str] = []
+    penalty_diagnostics = _empty_penalty_diagnostics() if cfg.penalty_diagnostics.enabled else None
 
     seen_positions: dict[PositionKey, int] = {}
     repetition_break_count = int(getattr(cfg.arena, 'repetition_break_count', 3))
@@ -260,7 +325,12 @@ def _play_engine_game(
                 termination='forced_repetition_draw',
                 winner=None,
                 result='1/2-1/2',
-                extra={'plies': plies, 'last_value': last_value, 'last_moves': move_history[-12:]},
+                extra={
+                    'plies': plies,
+                    'last_value': last_value,
+                    'last_moves': move_history[-12:],
+                    'penalty_diagnostics': _finalize_penalty_diagnostics(penalty_diagnostics, games=1) if penalty_diagnostics is not None else None,
+                },
             ), 'forced_repetition_draw', {}
 
         if plies >= cfg.selfplay.max_game_length:
@@ -269,19 +339,26 @@ def _play_engine_game(
                 termination='max_game_length',
                 winner=None,
                 result='1/2-1/2',
-                extra={'plies': plies, 'last_value': last_value, 'last_moves': move_history[-12:]},
+                extra={
+                    'plies': plies,
+                    'last_value': last_value,
+                    'last_moves': move_history[-12:],
+                    'penalty_diagnostics': _finalize_penalty_diagnostics(penalty_diagnostics, games=1) if penalty_diagnostics is not None else None,
+                },
             ), 'max_game_length', {}
 
         engine = white_engine if board.turn == chess.WHITE else black_engine
         is_candidate_turn = engine is candidate_engine
 
-        move, value, repetition_counts = _select_move_with_fallback(
+        move, value, repetition_counts, move_diagnostics = _select_move_with_fallback(
             engine,
             board,
             cfg,
             seen_positions,
             is_candidate=is_candidate_turn,
         )
+        if penalty_diagnostics is not None:
+            _merge_penalty_diagnostics(penalty_diagnostics, move_diagnostics)
         last_value = value
 
         if logger is not None and repetition_counts:
@@ -296,7 +373,12 @@ def _play_engine_game(
                 board,
                 termination='resignation_by_eval',
                 winner=winner,
-                extra={'plies': plies, 'last_value': value, 'last_moves': move_history[-12:]},
+                extra={
+                    'plies': plies,
+                    'last_value': value,
+                    'last_moves': move_history[-12:],
+                    'penalty_diagnostics': _finalize_penalty_diagnostics(penalty_diagnostics, games=1) if penalty_diagnostics is not None else None,
+                },
             )
             return board, outcome_info, 'resignation_by_eval', {}
 
@@ -306,7 +388,12 @@ def _play_engine_game(
                 termination='no_move_returned',
                 winner=None,
                 result='1/2-1/2',
-                extra={'plies': plies, 'last_value': last_value, 'last_moves': move_history[-12:]},
+                extra={
+                    'plies': plies,
+                    'last_value': last_value,
+                    'last_moves': move_history[-12:],
+                    'penalty_diagnostics': _finalize_penalty_diagnostics(penalty_diagnostics, games=1) if penalty_diagnostics is not None else None,
+                },
             ), 'no_move_returned', {}
 
         if move not in board.legal_moves:
@@ -314,7 +401,12 @@ def _play_engine_game(
                 board,
                 termination='illegal_move',
                 winner=not board.turn,
-                extra={'plies': plies, 'last_value': last_value, 'last_moves': move_history[-12:]},
+                extra={
+                    'plies': plies,
+                    'last_value': last_value,
+                    'last_moves': move_history[-12:],
+                    'penalty_diagnostics': _finalize_penalty_diagnostics(penalty_diagnostics, games=1) if penalty_diagnostics is not None else None,
+                },
             ), 'illegal_move', {}
 
         move_history.append(move.uci())
@@ -332,7 +424,12 @@ def _play_engine_game(
     return board, _make_outcome_info(
         board,
         outcome=outcome,
-        extra={'plies': plies, 'last_value': last_value, 'last_moves': move_history[-12:]},
+        extra={
+            'plies': plies,
+            'last_value': last_value,
+            'last_moves': move_history[-12:],
+            'penalty_diagnostics': _finalize_penalty_diagnostics(penalty_diagnostics, games=1) if penalty_diagnostics is not None else None,
+        },
     ), str(outcome.termination), {}
 
 
@@ -356,6 +453,8 @@ def play_match(best_model, candidate_model, device='cpu', cfg: AppConfig | None 
     decision = None
     decision_reason = None
     reason_counts = Counter()
+    plies_by_game: list[int] = []
+    penalty_diagnostics = _empty_penalty_diagnostics() if cfg.penalty_diagnostics.enabled else None
 
     logger.info(
         'arena start games=%d target=%.3f min_games_before_stop=%d '
@@ -391,6 +490,9 @@ def play_match(best_model, candidate_model, device='cpu', cfg: AppConfig | None 
         result = outcome_info.get('result')
         plies = outcome_info.get('plies')
         last_value = outcome_info.get('last_value')
+        plies_by_game.append(int(plies or 0))
+        if penalty_diagnostics is not None:
+            _merge_penalty_diagnostics(penalty_diagnostics, outcome_info.get('penalty_diagnostics'))
 
         if winner is None:
             draws += 1
@@ -465,6 +567,8 @@ def play_match(best_model, candidate_model, device='cpu', cfg: AppConfig | None 
     score = wins_new + 0.5 * draws
     win_rate = score / max(1, games_played)
     draw_rate = draws / max(1, games_played)
+    repetition_draws = sum(count for reason, count in reason_counts.items() if 'repetition' in str(reason))
+    avg_game_length = sum(plies_by_game) / max(1, len(plies_by_game))
 
     if draw_rate > float(cfg.arena.max_repetition_draw_rate):
         if wins_new == 0 and wins_best == 0:
@@ -491,11 +595,16 @@ def play_match(best_model, candidate_model, device='cpu', cfg: AppConfig | None 
         'losses_new': wins_best,
         'draws': draws,
         'games_played': games_played,
+        'draw_rate': float(draw_rate),
+        'repetition_draw_frequency': float(repetition_draws / max(1, games_played)),
+        'avg_game_length': float(avg_game_length),
         'accepted': decision == 'accepted',
         'decision': decision,
         'decision_reason': decision_reason,
         'termination_reasons': dict(reason_counts),
     }
+    if penalty_diagnostics is not None:
+        result['penalty_diagnostics'] = _finalize_penalty_diagnostics(penalty_diagnostics, games=games_played)
 
     logger.info(
         'arena complete games=%d score=%.1f win_rate=%.3f wins_new=%d losses_new=%d '
@@ -511,3 +620,46 @@ def play_match(best_model, candidate_model, device='cpu', cfg: AppConfig | None 
         dict(reason_counts),
     )
     return result
+
+
+def benchmark_vs_search(model, device='cpu', depth: int | None = None, games: int | None = None, cfg: AppConfig | None = None):
+    cfg = cfg or getattr(model, 'cfg', None) or get_current_config()
+    depth = int(depth if depth is not None else cfg.arena.baseline_search_depth)
+    games = int(games if games is not None else cfg.arena.benchmark_games)
+    games = max(1, games)
+
+    engine = Engine(model=model, cfg=cfg, device=device)
+    boards = _build_arena_opening_positions()
+    matches = 0
+    compared = 0
+    details = []
+
+    for idx in range(games):
+        board = boards[idx % len(boards)].copy(stack=False)
+        baseline_move, baseline_score = find_best_move(board.fen(), depth=depth)
+        analysis = engine.analyze(
+            board,
+            add_noise=False,
+            num_simulations=cfg.mcts.num_simulations,
+            temperature=float(cfg.arena.search_temperature),
+        )
+        engine_move = analysis.best_move.uci() if analysis.best_move is not None else None
+        is_match = engine_move == baseline_move
+        matches += int(is_match)
+        compared += 1
+        details.append({
+            'fen': board.fen(),
+            'engine_move': engine_move,
+            'baseline_move': baseline_move,
+            'baseline_score': int(baseline_score),
+            'engine_score': float(analysis.score),
+            'match': bool(is_match),
+        })
+
+    return {
+        'games': compared,
+        'depth': depth,
+        'matches': matches,
+        'match_rate': float(matches) / max(1, compared),
+        'details': details,
+    }

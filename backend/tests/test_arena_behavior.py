@@ -8,10 +8,11 @@ from app.infra.config import AppConfig, ArenaConfig
 
 
 class _StubAnalysis:
-    def __init__(self, visit_counts, policy, score=0.0):
+    def __init__(self, visit_counts, policy, score=0.0, penalty_diagnostics=None):
         self.visit_counts = visit_counts
         self.policy = policy
         self.score = score
+        self.penalty_diagnostics = penalty_diagnostics
 
 
 class _StubEngine:
@@ -55,8 +56,9 @@ def test_select_move_prefers_non_repetition_when_hard_block_enabled():
         score=0.1,
     ))
 
-    move, score, repetition_counts = _select_move_with_fallback(engine, board, cfg, seen_positions, is_candidate=True)
+    move, score, repetition_counts, diagnostics = _select_move_with_fallback(engine, board, cfg, seen_positions, is_candidate=True)
 
     assert move == fresh_move
     assert score == 0.1
     assert repetition_counts[repeat_move.uci()] >= 3
+    assert diagnostics is None

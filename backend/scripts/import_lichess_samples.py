@@ -94,7 +94,24 @@ def main() -> None:
     policy_indices = []
     values = []
 
-    shard_id = 0
+    # =========================================
+# AUTO SHARD ID (NO OVERWRITE)
+# =========================================
+
+    existing_shards = sorted(output_dir.glob("shard_*.npz"))
+
+    if existing_shards:
+        try:
+            last_id = max(int(p.stem.split("_")[1]) for p in existing_shards)
+            shard_id = last_id + 1
+            print(f"[RESUME] Found {len(existing_shards)} shards, continuing from shard_{shard_id}")
+        except Exception:
+            print("[WARN] Failed to parse shard IDs, starting from 0")
+            shard_id = 0
+    else:
+        shard_id = 0
+        print("[INIT] No existing shards found, starting from shard_0")
+
     total_samples = 0
     total_games = 0
 

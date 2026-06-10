@@ -1,18 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 import json
 import yaml
-from dataclasses import dataclass, field
-from typing import TypedDict
 from typing import TypedDict
 
 class PiecePenaltyCfg(TypedDict, total=False):
     blunder_penalty: float
     hanging_penalty: float
     sac_compensation_threshold: float
+    check_discount: float
 
 @dataclass(frozen=True)
 class ModelConfig:
@@ -40,8 +39,8 @@ class TrainingConfig:
     lr_decay_gamma: float = 0.997
     external_samples_path: str = ""
     external_samples_max: int = 0
+    buffer_size: int = 500000
 
-from dataclasses import dataclass
 import torch
 
 
@@ -91,25 +90,26 @@ class ReplayConfig:
 
 
 @dataclass(frozen=True)
+class PenaltyDiagnosticsConfig:
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
+class PrinciplePenaltiesConfig:
+    enabled: bool = False
+    max_total_per_move: float = 0.12
+    king_safety: float = 0.08
+    opening_development: float = 0.035
+    center_control: float = 0.035
+    tactics: float = 0.07
+    pawn_structure: float = 0.025
+    piece_activity: float = 0.025
+    rook_activity: float = 0.03
+    endgame: float = 0.025
+
+
+@dataclass(frozen=True)
 class MCTSConfig:
-    num_simulations: int = 256
-    c_puct: float = 1.8
-    dirichlet_alpha: float = 0.25
-    dirichlet_eps: float = 0.25
-    temperature: float = 1.0
-    classical_value_alpha: float = 0.35
-    resign_threshold: float = -0.965
-    min_resign_plies: int = 60
-    inference_batch_size: int = 24
-    virtual_loss: float = 1.0
-
-    queen_blunder_penalty: float = 0.5
-    queen_hanging_penalty: float = 0.24
-    queen_sac_compensation_threshold: float = 500
-    queen_check_discount: float = 0.75
-
-    piece_penalties: dict[str, PiecePenaltyCfg] = field(default_factory=dict)
-
     num_simulations: int = 256
     c_puct: float = 1.8
     dirichlet_alpha: float = 0.25
@@ -188,6 +188,8 @@ class AppConfig:
     training: TrainingConfig = TrainingConfig()
     external: ExternalDataConfig = ExternalDataConfig()
     replay: ReplayConfig = ReplayConfig()
+    penalty_diagnostics: PenaltyDiagnosticsConfig = PenaltyDiagnosticsConfig()
+    principle_penalties: PrinciplePenaltiesConfig = PrinciplePenaltiesConfig()
     mcts: MCTSConfig = MCTSConfig()
     selfplay: SelfPlayConfig = SelfPlayConfig()
     arena: ArenaConfig = ArenaConfig()
@@ -322,7 +324,7 @@ def _normalize_overrides(overrides: dict[str, Any]) -> dict[str, dict[str, Any]]
         original_key = key
         if key in {"board", "evaluation"}:
             key = "model" if key == "board" else "arena"
-        if key in {"model", "training", "external", "replay", "mcts", "selfplay", "arena", "system"}:
+        if key in {"model", "training", "external", "replay", "penalty_diagnostics", "principle_penalties", "mcts", "selfplay", "arena", "system"}:
             for sub_key, sub_value in (value or {}).items():
                 if sub_key in _FLAT_MAP:
                     section, field = _FLAT_MAP[sub_key]
@@ -350,6 +352,8 @@ def _deep_update(cfg: AppConfig, overrides: dict[str, Any]) -> AppConfig:
         training=TrainingConfig(**data["training"]),
         external=ExternalDataConfig(**data["external"]),
         replay=ReplayConfig(**data["replay"]),
+        penalty_diagnostics=PenaltyDiagnosticsConfig(**data["penalty_diagnostics"]),
+        principle_penalties=PrinciplePenaltiesConfig(**data["principle_penalties"]),
         mcts=MCTSConfig(**data["mcts"]),
         selfplay=SelfPlayConfig(**data["selfplay"]),
         arena=ArenaConfig(**data["arena"]),
@@ -425,6 +429,8 @@ def validate(cfg: AppConfig | None = None) -> None:
     if cfg.replay.save_shard_size <= 0:
         raise ValueError("replay.save_shard_size must be > 0")
 
+    _validate_principle_penalties(cfg.principle_penalties)
+
     if cfg.mcts.num_simulations <= 0:
         raise ValueError("mcts.num_simulations must be > 0")
     if cfg.mcts.inference_batch_size <= 0:
@@ -441,6 +447,7 @@ def validate(cfg: AppConfig | None = None) -> None:
         raise ValueError("mcts.queen_sac_compensation_threshold must be >= 0")
     if not (0.0 <= cfg.mcts.queen_check_discount <= 1.0):
         raise ValueError("mcts.queen_check_discount must be in [0, 1]")
+    _validate_piece_penalties(cfg.mcts.piece_penalties)
 
     if cfg.selfplay.max_game_length <= 0:
         raise ValueError("selfplay.max_game_length must be > 0")
@@ -481,6 +488,60 @@ def validate(cfg: AppConfig | None = None) -> None:
 
 
 validate_config = validate
+
+
+def _validate_principle_penalties(principles: PrinciplePenaltiesConfig) -> None:
+    if principles.max_total_per_move < 0.0:
+        raise ValueError("principle_penalties.max_total_per_move must be >= 0")
+    if principles.max_total_per_move > 0.5:
+        raise ValueError("principle_penalties.max_total_per_move is suspiciously large; expected <= 0.5")
+
+    for field_name in (
+        "king_safety",
+        "opening_development",
+        "center_control",
+        "tactics",
+        "pawn_structure",
+        "piece_activity",
+        "rook_activity",
+        "endgame",
+    ):
+        value = float(getattr(principles, field_name))
+        if value < 0.0:
+            raise ValueError(f"principle_penalties.{field_name} must be >= 0")
+        if value > 0.25:
+            raise ValueError(f"principle_penalties.{field_name} is suspiciously large; expected <= 0.25")
+
+
+def _validate_piece_penalties(piece_penalties: dict[str, PiecePenaltyCfg]) -> None:
+    if not isinstance(piece_penalties, dict):
+        raise ValueError("mcts.piece_penalties must be a mapping")
+
+    limits = {
+        "blunder_penalty": 1.0,
+        "hanging_penalty": 1.0,
+        "sac_compensation_threshold": 5000.0,
+        "check_discount": 1.0,
+    }
+    allowed = set(limits)
+
+    for piece_name, values in piece_penalties.items():
+        if not isinstance(values, dict):
+            raise ValueError(f"mcts.piece_penalties.{piece_name} must be a mapping")
+        for field_name, raw_value in values.items():
+            if field_name not in allowed:
+                continue
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"mcts.piece_penalties.{piece_name}.{field_name} must be numeric") from exc
+            if value < 0.0:
+                raise ValueError(f"mcts.piece_penalties.{piece_name}.{field_name} must be >= 0")
+            if value > limits[field_name]:
+                raise ValueError(
+                    f"mcts.piece_penalties.{piece_name}.{field_name}={value:g} is suspiciously large; "
+                    f"expected <= {limits[field_name]:g}"
+                )
 
 
 def _resolve_config_path(path: str | Path | None) -> Path | None:

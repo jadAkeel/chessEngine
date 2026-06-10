@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import struct
-from dataclasses import dataclass
+import random  # 🔥 أضفناها
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterator
 
@@ -83,12 +84,36 @@ def load_external_samples_with_stats(
     policy_indices = np.asarray(data['policy_indices'], dtype=np.int32)
     values = np.asarray(data['values'], dtype=np.float32)
 
+    expected_planes = int(cfg.model.input_planes)
+    if states.ndim != 4 or states.shape[1:] != (expected_planes, 8, 8):
+        raise ValueError(
+            f"External sample states must have shape (N, {expected_planes}, 8, 8); "
+            f"got {states.shape}"
+        )
+    if 'input_planes' in data and int(np.asarray(data['input_planes']).reshape(-1)[0]) != expected_planes:
+        actual_planes = int(np.asarray(data['input_planes']).reshape(-1)[0])
+        raise ValueError(
+            f"External sample input_planes mismatch: expected {expected_planes}, got {actual_planes}"
+        )
+    if 'policy_size' in data and int(np.asarray(data['policy_size']).reshape(-1)[0]) != NUM_MOVES:
+        actual_policy_size = int(np.asarray(data['policy_size']).reshape(-1)[0])
+        raise ValueError(
+            f"External sample policy_size mismatch: expected {NUM_MOVES}, got {actual_policy_size}"
+        )
+    if len(policy_indices) != len(states) or len(values) != len(states):
+        raise ValueError(
+            "External sample arrays must have matching first dimension: "
+            f"states={len(states)} policy_indices={len(policy_indices)} values={len(values)}"
+        )
+
     total_raw = len(states)
     print(f"[LOAD] raw samples={total_raw}")
 
     external_cfg = getattr(cfg, 'external', None)
     dedup_enabled = bool(getattr(external_cfg, 'dedup', True))
     filter_invalid = bool(getattr(external_cfg, 'filter_invalid', True))
+    drop_zero_states = bool(getattr(external_cfg, 'drop_zero_states', True))
+    shuffle_enabled = bool(getattr(external_cfg, 'shuffle', True))
 
     seen_hashes: set[bytes] = set()
 
@@ -104,10 +129,18 @@ def load_external_samples_with_stats(
 
     limit = total_raw if max_samples <= 0 else min(total_raw, max_samples)
 
-    for i in range(limit):
-        idx = int(policy_indices[i])
-        value = float(values[i])
-        state = np.ascontiguousarray(states[i], dtype=np.float16)
+    # 🔥 Shuffle indices داخل الشارد
+    if shuffle_enabled and 0 < limit < total_raw:
+        indices = random.sample(range(total_raw), limit)
+    else:
+        indices = list(range(limit))
+        if shuffle_enabled:
+            random.shuffle(indices)
+
+    for i, idx_i in enumerate(indices):
+        idx = int(policy_indices[idx_i])
+        value = float(values[idx_i])
+        state = np.ascontiguousarray(states[idx_i], dtype=np.float16)
 
         # ===== FILTER =====
         if filter_invalid:
@@ -119,7 +152,7 @@ def load_external_samples_with_stats(
                 stats["bad_value"] += 1
                 continue
 
-            if not np.all(np.isfinite(state)) or not np.any(state):
+            if not np.all(np.isfinite(state)) or (drop_zero_states and not np.any(state)):
                 stats["bad_state"] += 1
                 continue
 
@@ -135,7 +168,6 @@ def load_external_samples_with_stats(
         samples.append((state, policy, value))
         stats["accepted"] += 1
 
-        # 🔥 PROGRESS LOG
         if i % 20000 == 0 and i > 0:
             print(f"[PROGRESS] {i}/{limit} | accepted={stats['accepted']}")
 
@@ -146,6 +178,22 @@ def load_external_samples_with_stats(
     )
 
     return ExternalSampleLoadResult(samples=samples, stats=stats)
+
+
+def load_external_samples(
+    path: str | Path,
+    cfg: AppConfig,
+    *,
+    max_samples: int = 0,
+) -> Iterator[tuple[np.ndarray, PackedPolicy, float]]:
+    path = Path(path)
+    if path.is_dir():
+        yield from load_external_samples_sharded(path, cfg, max_samples=max_samples)
+        return
+
+    stable_cfg = replace(cfg, external=replace(cfg.external, shuffle=False))
+    result = load_external_samples_with_stats(path, stable_cfg, max_samples=max_samples)
+    yield from result.samples
 
 
 # =========================================
@@ -162,6 +210,11 @@ def load_external_samples_sharded(
     folder = Path(folder)
     shard_files = sorted(folder.glob("*.npz"))
 
+    # 🔥 Shuffle الشاردات
+    external_cfg = getattr(cfg, 'external', None)
+    if bool(getattr(external_cfg, 'shuffle', True)):
+        random.shuffle(shard_files)
+
     if not shard_files:
         raise FileNotFoundError(f"No shards found in {folder}")
 
@@ -170,17 +223,23 @@ def load_external_samples_sharded(
     total_streamed = 0
 
     for shard_id, shard_path in enumerate(shard_files):
-        print(f"\n[SHARD] ===== {shard_id+1}/{len(shard_files)} → {shard_path.name} =====")
+        print(f"\n[SHARD] ===== {shard_id+1}/{len(shard_files)} -> {shard_path.name} =====")
 
+        remaining = int(max_samples - total_streamed) if max_samples else 0
         result = load_external_samples_with_stats(
             shard_path,
             cfg,
-            max_samples=0,  # full shard
+            max_samples=remaining,
         )
 
         print(f"[SHARD DONE] accepted={result.stats['accepted']}")
 
-        for sample in result.samples:
+        # 🔥 Shuffle داخل الشارد
+        samples = result.samples
+        if bool(getattr(external_cfg, 'shuffle', True)):
+            random.shuffle(samples)
+
+        for sample in samples:
             yield sample
             total_streamed += 1
 

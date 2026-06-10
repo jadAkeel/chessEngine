@@ -1,173 +1,89 @@
-# ♟️ Chess Engine (Scalable ML Pipeline)
+# Chess Engine Project
 
-## Overview
+This version has been cleaned up so the backend modules use one consistent configuration system and can run together again.
 
-This project is a chess engine built around a full machine learning pipeline.
-The focus was not just training a model, but designing a system that can scale to large datasets without running into memory limitations.
+## What was fixed
 
-The system takes raw chess games and turns them into structured training data, then trains a neural network to evaluate positions and predict moves.
+- Unified the config layer and restored backward compatibility for the old `Config` style constants.
+- Fixed constructor/signature mismatches across `ChessNet`, `encode_board`, `predict_boards`, and `MCTS`.
+- Completed flat move indexing with `NUM_MOVES`, `move_to_index`, and `index_to_move`.
+- Repaired engine, self-play, replay buffer, training loop, arena evaluation, API startup, and CLI entry points.
+- Updated backend startup so it loads `backend/config/default.yaml` automatically.
 
----
+## Project structure
 
-## Data Pipeline (Sharding + Metadata)
+- `frontend/` – React + Vite chess UI
+- `backend/app/api/` – FastAPI endpoints and websocket
+- `backend/app/core/` – engine wrapper
+- `backend/app/model/` – neural network + checkpoint helpers
+- `backend/app/mcts/` – MCTS search
+- `backend/app/selfplay/` – self-play data generation
+- `backend/app/training/` – replay buffer + trainer + loop
+- `backend/config/default.yaml` – backend config
 
-The dataset is built from PGN chess games and converted into three main components:
+## Backend setup
 
-* **State** → encoded board (tensor)
-* **Policy** → move index
-* **Value** → game outcome
+From the project root:
 
-Instead of storing everything in a single large file, the dataset is split into **multiple shard files**:
-
-```text id="d1a9e2"
-shard_0.npz
-shard_1.npz
-shard_2.npz
-...
+```bash
+cd backend
+pip install -r requirements.txt
 ```
 
-Each shard contains:
+Run the API:
 
-* states
-* policy indices
-* values
-* metadata (input planes, policy size)
-
-### Why sharding?
-
-* Avoid loading huge datasets into RAM
-* Enable streaming during training
-* Allow scaling to millions of samples
-
-During training, shards are loaded one by one and processed incrementally.
-
----
-
-## Neural Network
-
-The model is implemented in PyTorch and follows a **dual-head architecture**:
-
-* **Policy head** → predicts the next move
-* **Value head** → evaluates the position
-
-Input:
-
-* Encoded chess board (multi-channel tensor)
-
-Output:
-
-* Move probabilities over all possible moves
-* Scalar evaluation of the position
-
-This structure is inspired by modern chess engines that combine move prediction and position evaluation.
-
----
-
-## Training Pipeline
-
-The training system is built to work with large datasets efficiently:
-
-1. Data is streamed from shard files
-2. Samples are pushed into a **Replay Buffer**
-3. The model is trained on mini-batches
-4. Loss is computed:
-
-   * Policy loss (classification)
-   * Value loss (regression)
-5. Model checkpoints are saved (latest + best)
-
-Validation is done on a separate subset of data to track performance.
-
----
-
-## Data Quality Handling
-
-To ensure training stability:
-
-* Duplicate samples are removed using hashing
-* Invalid board states are filtered
-* Illegal or out-of-range moves are discarded
-
-This prevents noisy data from degrading the model.
-
----
-
-## Testing & Evaluation
-
-The model is evaluated using:
-
-* Validation loss on unseen samples
-* Comparison between training iterations
-* (Optional) model vs model matches
-
-This helps verify that training is actually improving performance.
-
----
-
-## Project Structure
-
-```text id="ab83c1"
-backend/
- ├── training/
- │    ├── train_external.py
- │    ├── external_samples.py
- │    ├── replay_buffer.py
- │    └── trainer.py
- │
- ├── model/
- │    └── network.py
- │
- ├── game/
- │    ├── board_encoding.py
- │    └── move_encoding.py
- │
- └── scripts/
-      └── import_lichess_samples.py
+```bash
+PYTHONPATH=. uvicorn app.api.main:app --reload
 ```
 
----
+Health check:
 
-## Example Workflow
-
-```text id="7c1f0d"
-PGN games
-   ↓
-Data extraction
-   ↓
-Shard generation (+ metadata)
-   ↓
-Streaming loader
-   ↓
-Replay buffer
-   ↓
-Neural network training
-   ↓
-Validation / evaluation
+```bash
+curl http://127.0.0.1:8000/health
 ```
 
----
+## CLI commands
 
-## Tech Stack
+Run training:
 
-* Python
-* PyTorch
-* NumPy
-* python-chess
+```bash
+cd backend
+PYTHONPATH=. python -m app.cli.train --config config/default.yaml --iterations 5 --device cpu
+```
 
----
+Generate self-play data:
 
-## What I focused on
+```bash
+cd backend
+PYTHONPATH=. python -m app.cli.selfplay --config config/default.yaml --workers 1 --games-per-worker 1 --device cpu
+```
 
-* Building a scalable data pipeline
-* Handling large datasets efficiently
-* Designing a clean training architecture
-* Integrating data processing with model training
+Play in terminal:
 
----
+```bash
+cd backend
+PYTHONPATH=. python -m app.cli.play --config config/default.yaml --device cpu
+```
 
-## Future Improvements
+Evaluate a checkpoint:
 
-* Self-play training loop
-* MCTS integration
-* Better evaluation (Elo rating)
-* Training optimizations
+```bash
+cd backend
+PYTHONPATH=. python -m app.cli.evaluate --config config/default.yaml --model-path models/best_model.pth --device cpu
+```
+
+## Frontend setup
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+The frontend expects the backend to be running locally.
+
+## Notes
+
+- If no checkpoint exists, the backend starts with random weights.
+- The network output size is `4672` (`8 * 8 * 73`).
+- Training and gameplay are now internally consistent, but engine strength still depends on real training data and checkpoints.

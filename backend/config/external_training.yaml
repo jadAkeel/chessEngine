@@ -1,6 +1,6 @@
 external:
-  samples_path: data/externalSamples.npz
-  max_samples: 5000000
+  samples_path: data/external_samples.npz
+  max_samples: 75000000
   shuffle: true
   validation_split: 0.1
   seed: 42
@@ -12,9 +12,10 @@ external:
   benchmark_games: 8
 
 training:
+  buffer_size: 5000000
   batch_size: 64
   epochs: 2
-  train_steps_per_iter: 250
+  train_steps_per_iter: 4000
 
 system:
   checkpoint_path: models/external/external_best_model.pth
