@@ -27,6 +27,8 @@ MAX_SAMPLES = 75000000
 MIN_FULLMOVE = 1
 MAX_FULLMOVE = 12
 AUTOSAVE_MODE = "kaggle"
+AUTOSAVE_EVERY = 1
+DELETE_OLD_KAGGLE_VERSIONS = True
 KAGGLE_CHECKPOINT_DATASET_ID = "jadakil/external-model-checkpoints"
 KAGGLE_CHECKPOINT_DATASET_TITLE = "external-model-checkpoints"
 
@@ -111,6 +113,13 @@ def link_path_if_available(src, dst):
         print(f"[WARN] could not symlink {dst} -> {src}: {exc}", flush=True)
         return False
 
+if AUTOSAVE_MODE != "kaggle":
+    raise ValueError("AUTOSAVE_MODE must be 'kaggle' so checkpoints are versioned in the Kaggle Dataset.")
+if AUTOSAVE_EVERY != 1:
+    raise ValueError("AUTOSAVE_EVERY must be 1 to save after every completed iteration.")
+if not KAGGLE_CHECKPOINT_DATASET_ID:
+    raise ValueError("KAGGLE_CHECKPOINT_DATASET_ID is required for Kaggle autosave.")
+
 old_project = find_old_project_dir()
 DATA_DIR = old_project / "backend" / "data"
 MODEL_DIR = old_project / "backend" / "models"
@@ -139,6 +148,9 @@ print("REPLAY_BUFFER_DIR =", REPLAY_BUFFER_DIR if REPLAY_BUFFER_DIR else "not fo
 print("OUTPUT_DIR =", OUTPUT_DIR)
 print("SAMPLES_PATH =", SAMPLES_PATH)
 print("CHECKPOINT_INPUT_DIR =", CHECKPOINT_INPUT_DIR)
+print("AUTOSAVE_MODE =", AUTOSAVE_MODE)
+print("AUTOSAVE_EVERY =", AUTOSAVE_EVERY)
+print("KAGGLE_CHECKPOINT_DATASET_ID =", KAGGLE_CHECKPOINT_DATASET_ID)
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
@@ -219,13 +231,12 @@ env.setdefault("PYTHONIOENCODING", "utf-8")
 train_cmd = [
     sys.executable,
     "scripts/kaggle_train_external.py",
-    "--delete-old-versions",
     "--samples-path", str(SAMPLES_PATH),
     "--checkpoint-input-dir", str(CHECKPOINT_INPUT_DIR),
     "--save-dir", str(CHECKPOINT_DIR),
     "--config-out", str(OUTPUT_DIR / "external_training_kaggle.yaml"),
     "--autosave", AUTOSAVE_MODE,
-    "--autosave-every", "1",
+    "--autosave-every", str(AUTOSAVE_EVERY),
     "--autosave-dir", str(AUTOSAVE_DIR),
     "--kaggle-dataset-id", KAGGLE_CHECKPOINT_DATASET_ID,
     "--kaggle-dataset-title", KAGGLE_CHECKPOINT_DATASET_TITLE,
@@ -238,6 +249,9 @@ train_cmd = [
     "--max-fullmove", str(MAX_FULLMOVE),
 ]
 
+if DELETE_OLD_KAGGLE_VERSIONS:
+    train_cmd.append("--delete-old-versions")
+
 if BASE_MODEL is not None:
     train_cmd.extend(["--base-model", str(BASE_MODEL)])
 
@@ -248,4 +262,5 @@ print("Latest GitHub code used from:", GITHUB_REPO_URL, "branch", BRANCH_NAME)
 print("Kaggle samples used from:", SAMPLES_PATH)
 print("Previous checkpoints staged from:", CHECKPOINT_INPUT_DIR)
 print("New checkpoints saved in:", CHECKPOINT_DIR)
-print("Local checkpoint archives saved in:", AUTOSAVE_DIR)
+print("Kaggle autosave staging dir:", AUTOSAVE_DIR)
+print("Kaggle autosave dataset:", KAGGLE_CHECKPOINT_DATASET_ID)
