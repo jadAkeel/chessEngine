@@ -141,6 +141,9 @@ def _copy_checkpoint_inputs(args: argparse.Namespace) -> str | None:
             src = input_dir / name
             if src.exists():
                 dst = save_dir / name
+                if src.resolve() == dst.resolve():
+                    print(f"[CHECKPOINT] already staged: {dst}", flush=True)
+                    continue
                 shutil.copy2(src, dst)
                 print(f"[CHECKPOINT] copied {src} -> {dst}", flush=True)
         latest = save_dir / "external_latest_checkpoint.pth"
