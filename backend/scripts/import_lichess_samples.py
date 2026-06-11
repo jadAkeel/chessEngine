@@ -32,6 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-samples", type=int, default=1000000)
     parser.add_argument("--shard-size", type=int, default=100000)
     parser.add_argument("--min-fullmove", type=int, default=5)
+    parser.add_argument("--max-fullmove", type=int, default=0)
     parser.add_argument("--skip-draws", action="store_true")
     return parser
 
@@ -151,7 +152,10 @@ def main() -> None:
                     print("[WARN] illegal move detected, skipping game")
                     break
 
-                if board.fullmove_number >= int(args.min_fullmove):
+                if (
+                    board.fullmove_number >= int(args.min_fullmove)
+                    and (int(args.max_fullmove) <= 0 or board.fullmove_number <= int(args.max_fullmove))
+                ):
                     if not board.is_game_over(claim_draw=True) and not board.is_repetition():
 
                         state = encode_board(board, cfg).cpu().numpy().astype(np.float16, copy=False)

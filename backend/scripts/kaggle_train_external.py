@@ -98,6 +98,8 @@ def _write_config(args: argparse.Namespace) -> Path:
         "external:",
         f"  samples_path: {_yaml_string(args.samples_path)}",
         f"  max_samples: {int(args.max_samples)}",
+        f"  min_fullmove: {int(args.min_fullmove)}",
+        f"  max_fullmove: {int(args.max_fullmove)}",
         f"  shuffle: {str(args.shuffle).lower()}",
         f"  validation_split: {float(args.validation_split)}",
         f"  seed: {int(args.seed)}",
@@ -283,6 +285,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--install-requirements", action="store_true")
 
     parser.add_argument("--max-samples", type=int, default=75_000_000)
+    parser.add_argument("--min-fullmove", type=int, default=0)
+    parser.add_argument("--max-fullmove", type=int, default=0)
     parser.add_argument("--buffer-size", type=int, default=2_000_000)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=2)

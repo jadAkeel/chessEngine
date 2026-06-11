@@ -9,6 +9,7 @@ from typing import Iterator
 
 import numpy as np
 
+from app.game.board_encoding import FULLMOVE_NUMBER_PLANE
 from app.game.move_encoding import NUM_MOVES
 from app.infra.config import AppConfig
 from app.training.replay_buffer import PackedPolicy
@@ -62,6 +63,27 @@ def _build_policy(idx: int, *, soft_policy: bool = False, rng: np.random.Generat
         indices=np.array(indices, dtype=np.uint16),
         probs=np.array(probs, dtype=np.float16),
     )
+
+
+def _decoded_fullmove_number(state: np.ndarray, cfg: AppConfig) -> int:
+    max_fullmove = max(1, int(getattr(cfg.system, "max_fullmove", 1)))
+    encoded = float(state[FULLMOVE_NUMBER_PLANE, 0, 0])
+    return int(round(encoded * max_fullmove))
+
+
+def _sample_in_fullmove_range(state: np.ndarray, cfg: AppConfig) -> bool:
+    external_cfg = getattr(cfg, "external", None)
+    min_fullmove = int(getattr(external_cfg, "min_fullmove", 0))
+    max_fullmove = int(getattr(external_cfg, "max_fullmove", 0))
+    if min_fullmove <= 0 and max_fullmove <= 0:
+        return True
+
+    fullmove_number = _decoded_fullmove_number(state, cfg)
+    if min_fullmove > 0 and fullmove_number < min_fullmove:
+        return False
+    if max_fullmove > 0 and fullmove_number > max_fullmove:
+        return False
+    return True
 
 
 # =========================================
@@ -123,6 +145,7 @@ def load_external_samples_with_stats(
         "bad_policy": 0,
         "bad_value": 0,
         "bad_state": 0,
+        "skipped_fullmove": 0,
     }
 
     samples: list[tuple[np.ndarray, PackedPolicy, float]] = []
@@ -155,6 +178,10 @@ def load_external_samples_with_stats(
             if not np.all(np.isfinite(state)) or (drop_zero_states and not np.any(state)):
                 stats["bad_state"] += 1
                 continue
+
+        if not _sample_in_fullmove_range(state, cfg):
+            stats["skipped_fullmove"] += 1
+            continue
 
         # ===== DEDUP =====
         if dedup_enabled:
