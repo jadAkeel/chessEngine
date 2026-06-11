@@ -15,6 +15,11 @@ DEFAULT_KAGGLE_DATASET_ID = os.environ.get("KAGGLE_CHECKPOINT_DATASET_ID", "jada
 DEFAULT_SAVE_DIR = "/kaggle/working/checkpoints"
 DEFAULT_CONFIG_PATH = "/kaggle/working/external_training_kaggle.yaml"
 DEFAULT_AUTOSAVE_DIR = "/kaggle/working/autosaves"
+REQUIRED_AUTOSAVE_FILES = (
+    "external_latest_checkpoint.pth",
+    "external_best_model.pth",
+    "external_history.json",
+)
 
 
 def _backend_dir() -> Path:
@@ -164,6 +169,13 @@ def _prepare_kaggle_upload(save_dir: Path, upload_dir: Path, dataset_id: str, ti
         shutil.rmtree(upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
 
+    missing = [name for name in REQUIRED_AUTOSAVE_FILES if not (save_dir / name).exists()]
+    if missing:
+        raise FileNotFoundError(
+            f"Cannot autosave to Kaggle dataset {dataset_id}; missing required files in {save_dir}: "
+            + ", ".join(missing)
+        )
+
     copied = 0
     for pattern in ("*.pth", "*.json"):
         for src in save_dir.glob(pattern):
@@ -171,6 +183,8 @@ def _prepare_kaggle_upload(save_dir: Path, upload_dir: Path, dataset_id: str, ti
                 continue
             shutil.copy2(src, upload_dir / src.name)
             copied += 1
+            if src.name in REQUIRED_AUTOSAVE_FILES:
+                print(f"[AUTOSAVE] staging required file: {src.name}", flush=True)
 
     if copied == 0:
         raise FileNotFoundError(f"No checkpoint/history files found in {save_dir}")
