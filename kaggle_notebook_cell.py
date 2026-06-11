@@ -26,6 +26,9 @@ BUFFER_SIZE = 5000000
 MAX_SAMPLES = 75000000
 MIN_FULLMOVE = 1
 MAX_FULLMOVE = 12
+AUTOSAVE_MODE = "kaggle"
+KAGGLE_CHECKPOINT_DATASET_ID = "jadakil/external-model-checkpoints"
+KAGGLE_CHECKPOINT_DATASET_TITLE = "external-model-checkpoints"
 
 SAMPLES_PATH = None
 CHECKPOINT_INPUT_DIR = None
@@ -221,9 +224,11 @@ train_cmd = [
     "--checkpoint-input-dir", str(CHECKPOINT_INPUT_DIR),
     "--save-dir", str(CHECKPOINT_DIR),
     "--config-out", str(OUTPUT_DIR / "external_training_kaggle.yaml"),
-    "--autosave", "local",
+    "--autosave", AUTOSAVE_MODE,
     "--autosave-every", "1",
     "--autosave-dir", str(AUTOSAVE_DIR),
+    "--kaggle-dataset-id", KAGGLE_CHECKPOINT_DATASET_ID,
+    "--kaggle-dataset-title", KAGGLE_CHECKPOINT_DATASET_TITLE,
     "--iterations", str(ITERATIONS),
     "--device", DEVICE,
     "--train-steps-per-iter", str(TRAIN_STEPS_PER_ITER),
