@@ -51,6 +51,12 @@ class PrinciplePenaltyTests(unittest.TestCase):
         after.push(move)
         return principle_penalty_components(before, after, move, cfg or self._principles()).components
 
+    def _board_after_san(self, moves: tuple[str, ...]) -> chess.Board:
+        board = chess.Board()
+        for san in moves:
+            board.push_san(san)
+        return board
+
     def test_disabled_principles_return_no_penalty(self):
         components = self._components_after(
             "rnb1k1nr/4q1b1/1ppppp2/7p/P1PPP1PN/2NBB1P1/P6P/R2QR1K1 b - - 0 16",
@@ -112,6 +118,88 @@ class PrinciplePenaltyTests(unittest.TestCase):
 
         self.assertEqual(knight_components.get("opening_development", 0.0), 0.0)
         self.assertGreater(pawn_components.get("opening_development", 0.0), 0.0)
+
+    def test_early_f_pawn_move_is_penalized_more_than_knight_development(self):
+        board = self._board_after_san(("e4", "e6", "Bc4", "d6", "Nf3"))
+
+        f_pawn_components = self._components_for_board(board, chess.Move.from_uci("f7f6"))
+        knight_components = self._components_for_board(board, chess.Move.from_uci("g8f6"))
+
+        self.assertGreater(f_pawn_components.get("king_safety", 0.0), 0.0)
+        self.assertGreater(f_pawn_components.get("opening_development", 0.0), 0.0)
+        self.assertGreater(sum(f_pawn_components.values()), sum(knight_components.values()) + 0.05)
+
+    def test_single_step_center_pawn_is_penalized_when_double_step_is_available(self):
+        board = self._board_after_san(("e4",))
+
+        timid_components = self._components_for_board(board, chess.Move.from_uci("e7e6"))
+        assertive_components = self._components_for_board(board, chess.Move.from_uci("e7e5"))
+
+        self.assertGreater(timid_components.get("opening_development", 0.0), 0.0)
+        self.assertEqual(assertive_components.get("king_safety", 0.0), 0.0)
+        self.assertGreater(sum(timid_components.values()), sum(assertive_components.values()) + 0.02)
+
+    def test_serial_single_step_center_pawns_increase_opening_penalty(self):
+        first_board = self._board_after_san(("e4",))
+        first_components = self._components_for_board(first_board, chess.Move.from_uci("e7e6"))
+
+        repeated_board = self._board_after_san(("e4", "e6", "Bc4"))
+        repeated_components = self._components_for_board(repeated_board, chess.Move.from_uci("d7d6"))
+
+        self.assertGreater(
+            repeated_components.get("opening_development", 0.0),
+            first_components.get("opening_development", 0.0),
+        )
+
+    def test_flank_pawn_push_before_minor_development_is_penalized(self):
+        board = self._board_after_san(("e4", "e6", "Bc4", "d6", "Nf3"))
+
+        components = self._components_for_board(board, chess.Move.from_uci("b7b5"))
+
+        self.assertGreater(components.get("opening_development", 0.0), 0.0)
+        self.assertGreater(components.get("center_control", 0.0), 0.0)
+
+    def test_rook_retreat_after_early_lift_is_penalized(self):
+        board = self._board_after_san(
+            (
+                "e4",
+                "e6",
+                "Bc4",
+                "d6",
+                "Nf3",
+                "f6",
+                "d3",
+                "c6",
+                "Bf4",
+                "b5",
+                "Bb3",
+                "a5",
+                "Nc3",
+                "a4",
+                "Bxe6",
+                "Bxe6",
+                "O-O",
+                "g5",
+                "Be3",
+                "h5",
+                "Re1",
+                "h4",
+                "b3",
+                "a3",
+                "Nd4",
+                "Bf7",
+                "g4",
+                "hxg3",
+                "fxg3",
+                "Rh5",
+                "g4",
+            )
+        )
+
+        components = self._components_for_board(board, chess.Move.from_uci("h5h8"))
+
+        self.assertGreater(components.get("piece_activity", 0.0), 0.0)
+        self.assertGreater(components.get("rook_activity", 0.0), 0.0)
 
     def test_bishop_diagonal_pawn_move_is_allowed_after_center_claim(self):
         board = chess.Board()
