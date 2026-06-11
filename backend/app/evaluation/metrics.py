@@ -50,6 +50,8 @@ PIECE_TABLES = {
     chess.BISHOP: BISHOP_TABLE,
 }
 
+PASSED_PAWN_BONUS_BY_RELATIVE_RANK = [0, 8, 16, 28, 45, 80, 150, 0]
+
 
 def expected_score(rating_a, rating_b):
     return 1 / (1 + 10 ** ((rating_b - rating_a) / 400))
@@ -71,6 +73,31 @@ def piece_square_bonus(piece, square):
     val = table[idx]
 
     return val if piece.color == chess.WHITE else -val
+
+
+def is_passed_pawn(board: chess.Board, square: int, color: chess.Color) -> bool:
+    file_idx = chess.square_file(square)
+    rank = chess.square_rank(square)
+    enemy = not color
+    for enemy_pawn in board.pieces(chess.PAWN, enemy):
+        enemy_file = chess.square_file(enemy_pawn)
+        enemy_rank = chess.square_rank(enemy_pawn)
+        if abs(enemy_file - file_idx) > 1:
+            continue
+        if color == chess.WHITE and enemy_rank > rank:
+            return False
+        if color == chess.BLACK and enemy_rank < rank:
+            return False
+    return True
+
+
+def passed_pawn_bonus(board: chess.Board, square: int, color: chess.Color) -> int:
+    if not is_passed_pawn(board, square, color):
+        return 0
+    rank = chess.square_rank(square)
+    relative_rank = rank if color == chess.WHITE else 7 - rank
+    bonus = PASSED_PAWN_BONUS_BY_RELATIVE_RANK[relative_rank]
+    return bonus if color == chess.WHITE else -bonus
 
 
 def mobility_bonus(board):
@@ -95,6 +122,8 @@ def evaluate_board(board: chess.Board):
             score -= value
 
         score += piece_square_bonus(piece, square)
+        if piece.piece_type == chess.PAWN:
+            score += passed_pawn_bonus(board, square, piece.color)
 
     # mobility
     turn = 1 if board.turn == chess.WHITE else -1

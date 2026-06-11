@@ -45,15 +45,15 @@ penalty_diagnostics:
 
 principle_penalties:
   enabled: true
-  max_total_per_move: 0.12
-  king_safety: 0.08
-  opening_development: 0.035
-  center_control: 0.035
+  max_total_per_move: 0.20
+  king_safety: 0.10
+  opening_development: 0.055
+  center_control: 0.045
   tactics: 0.07
   pawn_structure: 0.025
   piece_activity: 0.025
-  rook_activity: 0.03
-  endgame: 0.025
+  rook_activity: 0.045
+  endgame: 0.040
 
 
 mcts:
