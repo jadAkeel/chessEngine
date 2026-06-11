@@ -60,6 +60,8 @@ class SparsePolicyBatchTensor:
 class ExternalDataConfig:
     samples_path: str = ""
     max_samples: int = 0
+    min_fullmove: int = 0
+    max_fullmove: int = 0
     shuffle: bool = True
     validation_split: float = 0.1
     seed: int = 42
@@ -405,6 +407,12 @@ def validate(cfg: AppConfig | None = None) -> None:
 
     if cfg.external.max_samples < 0:
         raise ValueError("external.max_samples must be >= 0")
+    if cfg.external.min_fullmove < 0:
+        raise ValueError("external.min_fullmove must be >= 0")
+    if cfg.external.max_fullmove < 0:
+        raise ValueError("external.max_fullmove must be >= 0")
+    if cfg.external.min_fullmove and cfg.external.max_fullmove and cfg.external.max_fullmove < cfg.external.min_fullmove:
+        raise ValueError("external.max_fullmove must be >= external.min_fullmove")
     if not (0.0 <= cfg.external.validation_split < 1.0):
         raise ValueError("external.validation_split must be in [0, 1)")
     if cfg.external.benchmark_games < 0:

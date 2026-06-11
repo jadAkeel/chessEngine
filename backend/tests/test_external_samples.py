@@ -6,15 +6,17 @@ import numpy as np
 import torch
 
 from app.game.move_encoding import NUM_MOVES
-from app.infra.config import AppConfig, ReplayConfig, TrainingConfig
+from app.infra.config import AppConfig, ExternalDataConfig, ReplayConfig, SystemConfig, TrainingConfig
 from app.training.external_samples import load_external_samples
 from app.training.replay_buffer import ReplayBuffer
 
 
 class ExternalSamplesTests(unittest.TestCase):
-    def _cfg(self, *, input_planes: int = 20, capacity: int = 8):
+    def _cfg(self, *, input_planes: int = 20, capacity: int = 8, min_fullmove: int = 0, max_fullmove: int = 0):
         cfg = AppConfig(
+            external=ExternalDataConfig(min_fullmove=min_fullmove, max_fullmove=max_fullmove),
             replay=ReplayConfig(capacity=capacity, prioritized=False),
+            system=SystemConfig(max_fullmove=120),
             training=TrainingConfig(batch_size=2),
         )
         if input_planes != cfg.model.input_planes:
@@ -26,6 +28,7 @@ class ExternalSamplesTests(unittest.TestCase):
                     value_dropout=cfg.model.value_dropout,
                 ),
                 training=cfg.training,
+                external=cfg.external,
                 replay=cfg.replay,
                 mcts=cfg.mcts,
                 selfplay=cfg.selfplay,
@@ -34,10 +37,12 @@ class ExternalSamplesTests(unittest.TestCase):
             )
         return cfg
 
-    def _write_npz(self, path: Path, *, input_planes: int = 20, count: int = 3):
+    def _write_npz(self, path: Path, *, input_planes: int = 20, count: int = 3, fullmoves: list[int] | None = None):
         states = np.zeros((count, input_planes, 8, 8), dtype=np.float16)
         for i in range(count):
             states[i, 0, 0, 0] = i + 1
+            if fullmoves is not None:
+                states[i, 19, :, :] = float(fullmoves[i]) / 120.0
         policy_indices = np.arange(count, dtype=np.int32)
         values = np.linspace(-1.0, 1.0, count, dtype=np.float32)
         np.savez_compressed(
@@ -87,8 +92,19 @@ class ExternalSamplesTests(unittest.TestCase):
             for state, policy, value in load_external_samples(path, cfg):
                 train_buffer.add(state, policy, value)
 
-        self.assertEqual(len(base), 1)
-        self.assertEqual(len(train_buffer), 3)
+            self.assertEqual(len(base), 1)
+            self.assertEqual(len(train_buffer), 3)
+
+    def test_load_external_samples_can_filter_by_fullmove_range(self):
+        cfg = self._cfg(min_fullmove=2, max_fullmove=3)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / 'ext.npz'
+            self._write_npz(path, input_planes=20, count=4, fullmoves=[1, 2, 3, 13])
+            loaded = list(load_external_samples(path, cfg))
+
+        self.assertEqual(len(loaded), 2)
+        self.assertEqual(float(loaded[0][0][19, 0, 0]), np.float16(2 / 120))
+        self.assertEqual(float(loaded[1][0][19, 0, 0]), np.float16(3 / 120))
 
 
 if __name__ == '__main__':
