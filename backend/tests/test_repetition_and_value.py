@@ -2,6 +2,7 @@ import unittest
 
 import chess
 
+from app.evaluation.metrics import evaluate_board
 from app.game.repetition import build_seen_positions, filter_repetition_moves
 from app.infra.config import AppConfig, ArenaConfig, MCTSConfig, ModelConfig, ReplayConfig, SelfPlayConfig, SystemConfig, TrainingConfig
 from app.mcts.search import MCTS
@@ -30,6 +31,12 @@ class RepetitionAndValueTests(unittest.TestCase):
         board = chess.Board("4k3/8/8/8/8/8/4q3/4K3 b - - 0 1")
         blended = mcts._blend_value(board, nn_value=0.0)
         self.assertGreater(blended, 0.5)
+
+    def test_classical_eval_rewards_advanced_black_passed_pawn(self):
+        distant = chess.Board("4k3/8/2p5/8/8/8/8/4K3 b - - 0 1")
+        near_promotion = chess.Board("4k3/8/8/8/8/8/2p5/4K3 b - - 0 1")
+
+        self.assertLess(evaluate_board(near_promotion), evaluate_board(distant) - 100)
 
     def test_claimable_threefold_is_treated_as_terminal_draw(self):
         cfg = self._cfg()

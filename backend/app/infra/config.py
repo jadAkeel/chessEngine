@@ -97,15 +97,15 @@ class PenaltyDiagnosticsConfig:
 @dataclass(frozen=True)
 class PrinciplePenaltiesConfig:
     enabled: bool = False
-    max_total_per_move: float = 0.12
-    king_safety: float = 0.08
-    opening_development: float = 0.035
-    center_control: float = 0.035
+    max_total_per_move: float = 0.2
+    king_safety: float = 0.1
+    opening_development: float = 0.055
+    center_control: float = 0.045
     tactics: float = 0.07
     pawn_structure: float = 0.025
     piece_activity: float = 0.025
-    rook_activity: float = 0.03
-    endgame: float = 0.025
+    rook_activity: float = 0.045
+    endgame: float = 0.04
 
 
 @dataclass(frozen=True)

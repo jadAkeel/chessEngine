@@ -29,6 +29,7 @@ RIM_FILES = {0, 7}
 RIM_RANKS = {0, 7}
 KINGSIDE_FILES = {5, 6, 7}
 QUEENSIDE_FILES = {0, 1, 2}
+EARLY_SINGLE_STEP_PAWN_FILES = {2, 3, 4, 5}
 
 
 @dataclass(frozen=True)
@@ -68,7 +69,7 @@ def principle_penalty_components(
     _tactics(after, mover, add)
     _pawn_structure(before, after, move, mover, add)
     _piece_activity(before, after, move, mover, add)
-    _rook_activity(before, after, mover, add)
+    _rook_activity(before, after, move, mover, add)
     _endgame(before, after, move, mover, add)
 
     cap = max(0.0, float(getattr(cfg, "max_total_per_move", 0.0)))
@@ -85,6 +86,9 @@ def _king_safety(before: chess.Board, after: chess.Board, move: chess.Move, move
     if piece is None:
         return
 
+    if piece.piece_type == chess.PAWN and _is_early_f_pawn_move(before, move, mover):
+        add("king_safety", 0.8, "early_f_pawn_move_weakens_king")
+
     if piece.piece_type == chess.PAWN and _is_kingside_pawn_push(before, move, mover):
         if _own_king_castled_or_kingside(before, mover) and not before.is_capture(move) and not after.is_check():
             add("king_safety", 1.0, "kingside_pawn_push_after_castling")
@@ -98,6 +102,8 @@ def _king_safety(before: chess.Board, after: chess.Board, move: chess.Move, move
             add("king_safety", 0.7, "delayed_castling")
 
     if _king_on_start_square(before, mover) and _opens_center(before, move):
+        if _is_opening_central_pawn_claim(before, move, mover):
+            return
         add("king_safety", 0.9, "opened_center_with_uncastled_king")
 
 
@@ -123,8 +129,20 @@ def _opening_development(before: chess.Board, after: chess.Board, move: chess.Mo
         return
 
     if piece.piece_type == chess.PAWN:
+        if _is_early_f_pawn_move(before, move, mover):
+            add("opening_development", 1.2 * phase_scale, "early_f_pawn_move_blocks_knight")
+        if _is_timid_opening_pawn_single_step(before, move, mover):
+            scale = 0.65 if _opens_home_bishop_diagonal(before, move, mover) else 1.0
+            add("opening_development", scale * phase_scale, "single_step_pawn_when_double_step_available")
+            repeated_scale = min(1.2, 0.55 * _recent_own_timid_pawn_single_steps(before, mover))
+            if repeated_scale > 0.0:
+                add("opening_development", repeated_scale * phase_scale, "serial_single_step_pawn_moves_before_development")
         if _piece_has_moved_before(before, move.from_square):
             add("opening_development", 0.9 * phase_scale, "repeated_pawn_move_before_development")
+        elif _flank_pawn_push(before, move, mover) and not (
+            _opens_home_bishop_diagonal(before, move, mover) and _is_single_step_pawn_move(move)
+        ):
+            add("opening_development", 1.0 * phase_scale, "flank_pawn_push_before_minor_development")
         elif (
             _has_central_pawn_presence(before, mover)
             and not _is_central_pawn_advance(before, move, mover)
@@ -136,6 +154,10 @@ def _opening_development(before: chess.Board, after: chess.Board, move: chess.Mo
     if piece.piece_type in {chess.KNIGHT, chess.BISHOP}:
         if _is_passive_development_square(move.to_square, mover):
             add("opening_development", 0.6 * phase_scale, "minor_piece_to_passive_square")
+        return
+
+    if piece.piece_type == chess.ROOK:
+        add("opening_development", 0.9 * phase_scale, "rook_move_before_minor_development")
         return
 
     if before.fullmove_number >= 5 and not before.is_castling(move):
@@ -190,13 +212,26 @@ def _piece_activity(before: chess.Board, after: chess.Board, move: chess.Move, m
     if piece.piece_type == chess.KNIGHT and _is_rim_square(move.to_square) and not before.is_capture(move) and not after.is_check():
         add("piece_activity", 0.8, "knight_on_rim")
 
+    if piece.piece_type in {chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN}:
+        if _undoes_recent_own_piece_move(before, move, mover) and not before.is_capture(move) and not after.is_check():
+            add("piece_activity", 0.7, "undoes_recent_piece_move")
+
     captured = before.piece_at(move.to_square)
     if piece.piece_type == chess.BISHOP and captured is not None and captured.piece_type == chess.KNIGHT:
         if not after.is_check() and _material_without_kings(before, mover) >= _material_without_kings(before, not mover):
             add("piece_activity", 0.4, "bishop_for_knight_without_clear_reason")
 
 
-def _rook_activity(before: chess.Board, after: chess.Board, mover: chess.Color, add) -> None:
+def _rook_activity(before: chess.Board, after: chess.Board, move: chess.Move, mover: chess.Color, add) -> None:
+    piece = before.piece_at(move.from_square)
+    if piece is not None and piece.color == mover and piece.piece_type == chess.ROOK:
+        if not before.is_capture(move) and not after.is_check():
+            home_minors = _minor_pieces_on_home_squares(before, mover)
+            if before.fullmove_number <= 24 and home_minors >= 2:
+                add("rook_activity", 0.8, "rook_move_with_minor_pieces_undeveloped")
+            if _undoes_recent_own_piece_move(before, move, mover):
+                add("rook_activity", 0.7, "rook_returns_to_previous_square")
+
     opponent = not mover
     enemy_rooks = after.pieces(chess.ROOK, opponent)
     danger_rank = 1 if mover == chess.WHITE else 6
@@ -229,6 +264,25 @@ def _endgame(before: chess.Board, after: chess.Board, move: chess.Move, mover: c
 def _is_kingside_pawn_push(board: chess.Board, move: chess.Move, mover: chess.Color) -> bool:
     piece = board.piece_at(move.from_square)
     return bool(piece and piece.color == mover and piece.piece_type == chess.PAWN and chess.square_file(move.from_square) in KINGSIDE_FILES)
+
+
+def _is_early_f_pawn_move(board: chess.Board, move: chess.Move, mover: chess.Color) -> bool:
+    piece = board.piece_at(move.from_square)
+    if piece is None or piece.color != mover or piece.piece_type != chess.PAWN:
+        return False
+    if chess.square_file(move.from_square) != 5 or board.fullmove_number > 12:
+        return False
+
+    home_rank = 1 if mover == chess.WHITE else 6
+    knight_square = chess.G1 if mover == chess.WHITE else chess.G8
+    knight = board.piece_at(knight_square)
+    return bool(
+        chess.square_rank(move.from_square) == home_rank
+        and knight is not None
+        and knight.color == mover
+        and knight.piece_type == chess.KNIGHT
+        and _king_on_start_square(board, mover)
+    )
 
 
 def _flank_pawn_push(board: chess.Board, move: chess.Move, mover: chess.Color) -> bool:
@@ -284,6 +338,19 @@ def _piece_has_moved_before(board: chess.Board, square: int) -> bool:
     return False
 
 
+def _undoes_recent_own_piece_move(board: chess.Board, move: chess.Move, mover: chess.Color, plies: int = 8) -> bool:
+    start = max(0, len(board.move_stack) - int(plies))
+    last_move_index = len(board.move_stack) - 1
+    for idx in range(len(board.move_stack) - 1, start - 1, -1):
+        previous = board.move_stack[idx]
+        previous_mover = not board.turn if (last_move_index - idx) % 2 == 0 else board.turn
+        if previous_mover != mover:
+            continue
+        if previous.from_square == move.to_square and previous.to_square == move.from_square:
+            return True
+    return False
+
+
 def _has_central_pawn_presence(board: chess.Board, color: chess.Color) -> bool:
     return any(square in CENTRAL_SQUARES for square in board.pieces(chess.PAWN, color))
 
@@ -293,6 +360,66 @@ def _is_central_pawn_advance(board: chess.Board, move: chess.Move, mover: chess.
     if piece is None or piece.color != mover or piece.piece_type != chess.PAWN:
         return False
     return move.to_square in CENTRAL_SQUARES and chess.square_file(move.from_square) in {3, 4}
+
+
+def _is_opening_central_pawn_claim(board: chess.Board, move: chess.Move, mover: chess.Color) -> bool:
+    piece = board.piece_at(move.from_square)
+    if piece is None or piece.color != mover or piece.piece_type != chess.PAWN:
+        return False
+    if board.fullmove_number > 8:
+        return False
+    from_file = chess.square_file(move.from_square)
+    from_rank = chess.square_rank(move.from_square)
+    start_rank = 1 if mover == chess.WHITE else 6
+    return bool(from_file in {3, 4} and from_rank == start_rank and move.to_square in CENTRAL_SQUARES)
+
+
+def _is_single_step_pawn_move(move: chess.Move) -> bool:
+    return abs(chess.square_rank(move.to_square) - chess.square_rank(move.from_square)) == 1
+
+
+def _is_timid_opening_pawn_single_step(board: chess.Board, move: chess.Move, mover: chess.Color) -> bool:
+    piece = board.piece_at(move.from_square)
+    if piece is None or piece.color != mover or piece.piece_type != chess.PAWN:
+        return False
+    if not _is_home_pawn_single_step_shape(move, mover):
+        return False
+    if chess.square_file(move.from_square) not in EARLY_SINGLE_STEP_PAWN_FILES:
+        return False
+
+    double_move = _matching_double_step_move(move, mover)
+    return double_move in board.legal_moves
+
+
+def _recent_own_timid_pawn_single_steps(board: chess.Board, mover: chess.Color, plies: int = 8) -> int:
+    count = 0
+    start = max(0, len(board.move_stack) - int(plies))
+    last_move_index = len(board.move_stack) - 1
+    for idx in range(len(board.move_stack) - 1, start - 1, -1):
+        previous = board.move_stack[idx]
+        previous_mover = not board.turn if (last_move_index - idx) % 2 == 0 else board.turn
+        if previous_mover != mover:
+            continue
+        if _is_home_pawn_single_step_shape(previous, mover):
+            count += 1
+    return count
+
+
+def _is_home_pawn_single_step_shape(move: chess.Move, mover: chess.Color) -> bool:
+    from_rank = chess.square_rank(move.from_square)
+    to_rank = chess.square_rank(move.to_square)
+    from_file = chess.square_file(move.from_square)
+    to_file = chess.square_file(move.to_square)
+    start_rank = 1 if mover == chess.WHITE else 6
+    step = 1 if mover == chess.WHITE else -1
+    return from_file == to_file and from_rank == start_rank and to_rank == start_rank + step
+
+
+def _matching_double_step_move(move: chess.Move, mover: chess.Color) -> chess.Move:
+    from_file = chess.square_file(move.from_square)
+    start_rank = 1 if mover == chess.WHITE else 6
+    step = 1 if mover == chess.WHITE else -1
+    return chess.Move(move.from_square, chess.square(from_file, start_rank + 2 * step))
 
 
 def _opens_home_bishop_diagonal(board: chess.Board, move: chess.Move, mover: chess.Color) -> bool:
