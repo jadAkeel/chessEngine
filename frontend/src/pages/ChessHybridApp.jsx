@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Brain, RotateCcw, Swords, Zap, Globe, Users } from "lucide-react";
+import { playMoveSoundFor } from "@/utils/sound";
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "");
 
@@ -190,13 +191,14 @@ export default function ChessHybridApp() {
     });
   }
 
-  async function maybePlayEngine() {
+  async function maybePlayEngine(activePlayerColor = playerColor) {
     if (game.isGameOver()) return;
-    if (game.turn() === playerColor) return;
+    if (game.turn() === activePlayerColor) return;
 
     setEngineThinking(true);
     try {
-      const requestedSimulations = Math.max(24, Math.min(140, Number(depth) * 30));
+      const requestedSimulations = Math.max(16, Math.min(100, Number(depth) * 16));
+      // const requestedSimulations = Math.max(24, Math.min(140, Number(depth) * 30));
       const res = await fetch(`${API_BASE_URL}/bestmove`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -220,6 +222,7 @@ export default function ChessHybridApp() {
         if (move) {
           highlightLastMove(move.from, move.to);
           syncGame();
+          playMoveSoundFor(move, game);
         }
       }
     } catch (err) {
@@ -229,6 +232,7 @@ export default function ChessHybridApp() {
         game.move(fallback);
         highlightLastMove(fallback.from, fallback.to);
         syncGame();
+        playMoveSoundFor(fallback, game);
       }
     } finally {
       setEngineThinking(false);
@@ -292,11 +296,12 @@ export default function ChessHybridApp() {
       setOptionSquares({});
       highlightLastMove(move.from, move.to);
       syncGame();
+      playMoveSoundFor(move, game);
 
       if (isMultiplayer) {
-         wsRef.current?.send(JSON.stringify({ type: "move", move: moveToUci(move) }));
+        wsRef.current?.send(JSON.stringify({ type: "move", move: moveToUci(move) }));
       } else {
-         window.setTimeout(maybePlayEngine, 250);
+        void maybePlayEngine();
       }
       return true;
     } catch (e) {
@@ -319,11 +324,12 @@ export default function ChessHybridApp() {
       setOptionSquares({});
       highlightLastMove(move.from, move.to);
       syncGame();
+      playMoveSoundFor(move, game);
       
       if (isMultiplayer) {
-         wsRef.current?.send(JSON.stringify({ type: "move", move: moveToUci(move) }));
+        wsRef.current?.send(JSON.stringify({ type: "move", move: moveToUci(move) }));
       } else {
-         window.setTimeout(maybePlayEngine, 250);
+        void maybePlayEngine();
       }
     } catch (e) {
       setPromotionMoveDetail(null);
@@ -380,11 +386,12 @@ export default function ChessHybridApp() {
         setOptionSquares({});
         highlightLastMove(move.from, move.to);
         syncGame();
+        playMoveSoundFor(move, game);
 
         if (isMultiplayer) {
           wsRef.current?.send(JSON.stringify({ type: "move", move: moveToUci(move) }));
         } else {
-          window.setTimeout(maybePlayEngine, 250);
+          void maybePlayEngine();
         }
       } else {
          const piece = game.get(square);
@@ -415,7 +422,7 @@ export default function ChessHybridApp() {
     setOptionSquares({});
     setPlayerColor(nextColor);
     if (nextColor === "b") {
-      window.setTimeout(maybePlayEngine, 350);
+      void maybePlayEngine(nextColor);
     }
   }
 
