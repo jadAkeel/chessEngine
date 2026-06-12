@@ -3,6 +3,7 @@ uvicorn[standard]>=0.30.0
 python-chess>=1.999
 numpy>=1.26.0
 PyYAML>=6.0.1
-torch>=2.3.0
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.12.0+cpu
 
 zstandard>=0.23.0
