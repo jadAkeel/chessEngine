@@ -8,7 +8,10 @@ import { Badge } from "@/components/ui/badge";
 import { Brain, RotateCcw, Swords, Zap, Globe, Users } from "lucide-react";
 import { playMoveSoundFor } from "@/utils/sound";
 
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "");
+const DEFAULT_API_BASE_URL = import.meta.env.PROD
+  ? "https://chessengine-2.onrender.com"
+  : "http://localhost:8000";
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, "");
 
 function buildWebSocketUrl(roomId) {
   if (!roomId) return "";
