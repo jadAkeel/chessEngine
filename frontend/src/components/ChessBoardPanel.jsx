@@ -1,6 +1,7 @@
 import React, { useState, useRef } from 'react'
 import { Chessboard } from 'react-chessboard'
 import { Chess } from 'chess.js'
+import { playMoveSoundFor } from '@/utils/sound'
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '')
 
@@ -22,7 +23,8 @@ export default function ChessBoardPanel() {
       if (uci) {
         const from = uci.slice(0, 2)
         const to = uci.slice(2, 4)
-        gameRef.current.move({ from, to, promotion: 'q' })
+        const move = gameRef.current.move({ from, to, promotion: 'q' })
+        if (move) playMoveSoundFor(move, gameRef.current)
         setFen(gameRef.current.fen())
       }
     } catch (err) {
@@ -35,6 +37,7 @@ export default function ChessBoardPanel() {
   const onDrop = (sourceSquare, targetSquare) => {
     const move = gameRef.current.move({ from: sourceSquare, to: targetSquare, promotion: 'q' })
     if (move === null) return false
+    playMoveSoundFor(move, gameRef.current)
     setFen(gameRef.current.fen())
     makeEngineMove(gameRef.current.fen())
     return true
