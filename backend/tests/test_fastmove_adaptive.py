@@ -40,12 +40,20 @@ def test_adaptive_simulations_raise_budget_for_complex_positions():
 def test_adaptive_search_skips_quiet_close_policy_scores():
     assert _should_use_adaptive_search(3, ["top_moves_very_close"], depth=6) is False
     assert _should_use_adaptive_search(4, ["top_moves_close", "forcing_moves_available"], depth=6) is False
+    assert _should_use_adaptive_search(2, ["many_forcing_moves"], depth=6) is False
 
 
 def test_adaptive_search_runs_for_tactical_urgency():
     assert _should_use_adaptive_search(3, ["king_in_check"], depth=6) is True
     assert _should_use_adaptive_search(4, ["best_fast_move_allows_mate"], depth=6) is True
     assert _should_use_adaptive_search(6, ["many_forcing_moves", "top_moves_close"], depth=6) is True
+    assert _should_use_adaptive_search(4, ["many_forcing_moves", "top_moves_close"], depth=6) is True
+    assert _should_use_adaptive_search(
+        4,
+        ["many_forcing_moves", "top_moves_competitive", "high_value_capture"],
+        depth=6,
+    ) is True
+    assert _should_use_adaptive_search(4, ["forcing_moves_available", "top_moves_very_close"], depth=6) is True
 
 
 def test_complexity_marks_check_as_forcing_position():

@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
-import { Brain, RotateCcw, Swords, Zap, Globe, Users } from "lucide-react";
+import { Brain, Loader2, RotateCcw, Swords, Zap, Globe, Users } from "lucide-react";
 import { playMoveSoundFor } from "@/utils/sound";
 
 const DEFAULT_API_BASE_URL = import.meta.env.PROD
@@ -74,7 +74,10 @@ function pickEngineMove(game, depth) {
   return scored[0].move;
 }
 
-function formatStatus(game, engineThinking, playerColor, isMultiplayer) {
+function formatStatus(game, engineThinking, playerColor, isMultiplayer, engineWarmupStatus) {
+  if (!isMultiplayer && engineWarmupStatus === "waking" && engineThinking) return "Loading engine model...";
+  if (!isMultiplayer && engineWarmupStatus === "waking") return "Preparing engine server...";
+  if (!isMultiplayer && engineWarmupStatus === "error" && engineThinking) return "Using local evaluation...";
   if (!isMultiplayer && engineThinking) return "Engine is thinking...";
   if (game.isCheckmate()) {
     return game.turn() === "w" ? "Black wins by checkmate" : "White wins by checkmate";
@@ -121,6 +124,20 @@ function CapturedPieces({ game }) {
   );
 }
 
+function isEnPassantMove(move) {
+  return typeof move?.flags === "string" && move.flags.includes("e");
+}
+
+function enPassantCapturedSquare(move) {
+  if (!isEnPassantMove(move)) return null;
+  return `${move.to[0]}${move.from[1]}`;
+}
+
+function formatHistoryMove(move) {
+  if (!isEnPassantMove(move)) return move.san;
+  return move.san.includes("e.p.") ? move.san : `${move.san} e.p.`;
+}
+
 export default function ChessHybridApp() {
   const gameRef = useRef(new Chess());
   const [fen, setFen] = useState(gameRef.current.fen());
@@ -128,6 +145,7 @@ export default function ChessHybridApp() {
   const [playerColor, setPlayerColor] = useState("w");
   const [depth, setDepth] = useState("6");
   const [engineThinking, setEngineThinking] = useState(false);
+  const [engineWarmupStatus, setEngineWarmupStatus] = useState("idle");
   const [lastMoveSquares, setLastMoveSquares] = useState({});
   const [moveFrom, setMoveFrom] = useState("");
   const [optionSquares, setOptionSquares] = useState({});
@@ -139,10 +157,17 @@ export default function ChessHybridApp() {
   const [promotionMoveDetail, setPromotionMoveDetail] = useState(null);
 
   const wsRef = useRef(null);
+  const engineWarmupPromiseRef = useRef(null);
   const game = gameRef.current;
   const playerTurn = game.turn() === playerColor;
+  const engineWaking = !isMultiplayer && engineWarmupStatus === "waking";
+  const engineLoadOverlayVisible = engineThinking && engineWaking;
 
   const boardOrientation = playerColor === "w" ? "white" : "black";
+
+  useEffect(() => {
+    void warmupEngineServer();
+  }, []);
 
   useEffect(() => {
     if (isMultiplayer && roomId) {
@@ -180,18 +205,53 @@ export default function ChessHybridApp() {
 
   function syncGame() {
     setFen(game.fen());
-    setMoveHistory([...game.history()]);
+    setMoveHistory(game.history({ verbose: true }).map(formatHistoryMove));
   }
 
   function moveToUci(move) {
     return `${move.from}${move.to}${move.promotion || ""}`;
   }
 
-  function highlightLastMove(from, to) {
-    setLastMoveSquares({
-      [from]: { background: "rgba(250, 204, 21, 0.35)" },
-      [to]: { background: "rgba(250, 204, 21, 0.35)" },
-    });
+  function highlightLastMove(move) {
+    const styles = {
+      [move.from]: { background: "rgba(250, 204, 21, 0.35)" },
+      [move.to]: { background: "rgba(250, 204, 21, 0.35)" },
+    };
+    const capturedSquare = enPassantCapturedSquare(move);
+    if (capturedSquare) {
+      styles[capturedSquare] = {
+        background: "rgba(239, 68, 68, 0.38)",
+        boxShadow: "inset 0 0 0 3px rgba(248, 113, 113, 0.75)",
+      };
+    }
+    setLastMoveSquares(styles);
+  }
+
+  async function warmupEngineServer() {
+    if (isMultiplayer) return true;
+    if (engineWarmupStatus === "ready") return true;
+    if (engineWarmupPromiseRef.current) return engineWarmupPromiseRef.current;
+
+    setEngineWarmupStatus("waking");
+    const warmupPromise = fetch(`${API_BASE_URL}/health`, { cache: "no-store" })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`Health check failed: ${res.status}`);
+        const data = await res.json().catch(() => ({}));
+        if (data.model === false) throw new Error("Model is not loaded");
+        setEngineWarmupStatus("ready");
+        return true;
+      })
+      .catch((err) => {
+        console.error("Engine warmup failed", err);
+        setEngineWarmupStatus("error");
+        return false;
+      })
+      .finally(() => {
+        engineWarmupPromiseRef.current = null;
+      });
+
+    engineWarmupPromiseRef.current = warmupPromise;
+    return warmupPromise;
   }
 
   async function maybePlayEngine(activePlayerColor = playerColor) {
@@ -200,6 +260,9 @@ export default function ChessHybridApp() {
 
     setEngineThinking(true);
     try {
+      const serverReady = await warmupEngineServer();
+      if (!serverReady) throw new Error("Engine server is not ready");
+
       const engineDepth = Number(depth);
       const candidateCount = Math.max(10, Math.min(16, engineDepth * 3));
       const res = await fetch(`${API_BASE_URL}/fastmove`, {
@@ -229,7 +292,7 @@ export default function ChessHybridApp() {
 
         const move = game.move(moveDetails);
         if (move) {
-          highlightLastMove(move.from, move.to);
+          highlightLastMove(move);
           syncGame();
           playMoveSoundFor(move, game);
         }
@@ -238,10 +301,12 @@ export default function ChessHybridApp() {
       console.error('Engine request failed', err);
       const fallback = pickEngineMove(game, Number(depth));
       if (fallback) {
-        game.move(fallback);
-        highlightLastMove(fallback.from, fallback.to);
-        syncGame();
-        playMoveSoundFor(fallback, game);
+        const move = game.move(fallback);
+        if (move) {
+          highlightLastMove(move);
+          syncGame();
+          playMoveSoundFor(move, game);
+        }
       }
     } finally {
       setEngineThinking(false);
@@ -303,7 +368,7 @@ export default function ChessHybridApp() {
       });
       setMoveFrom("");
       setOptionSquares({});
-      highlightLastMove(move.from, move.to);
+      highlightLastMove(move);
       syncGame();
       playMoveSoundFor(move, game);
 
@@ -331,7 +396,7 @@ export default function ChessHybridApp() {
       setPromotionMoveDetail(null);
       setMoveFrom("");
       setOptionSquares({});
-      highlightLastMove(move.from, move.to);
+      highlightLastMove(move);
       syncGame();
       playMoveSoundFor(move, game);
       
@@ -393,7 +458,7 @@ export default function ChessHybridApp() {
         });
         setMoveFrom("");
         setOptionSquares({});
-        highlightLastMove(move.from, move.to);
+        highlightLastMove(move);
         syncGame();
         playMoveSoundFor(move, game);
 
@@ -451,7 +516,7 @@ export default function ChessHybridApp() {
     }
   }
 
-  const status = formatStatus(game, engineThinking, playerColor, isMultiplayer);
+  const status = formatStatus(game, engineThinking, playerColor, isMultiplayer, engineWarmupStatus);
 
   const movePairs = [];
   for (let i = 0; i < moveHistory.length; i += 2) {
@@ -487,11 +552,21 @@ export default function ChessHybridApp() {
                   onSquareClick={onSquareClick}
                   boardOrientation={boardOrientation}
                   customSquareStyles={customSquareStyles}
-                  arePiecesDraggable={!engineThinking}
+                  arePiecesDraggable={!engineThinking && !(engineWaking && !playerTurn)}
                   customDarkSquareStyle={{ backgroundColor: "#769656" }}
                   customLightSquareStyle={{ backgroundColor: "#eeeed2" }}
                   customBoardStyle={{ borderRadius: "8px", boxShadow: "0 10px 30px rgba(0,0,0,0.35)" }}
                 />
+
+                {engineLoadOverlayVisible && (
+                  <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-3 rounded-lg bg-zinc-950/80 text-center backdrop-blur-sm">
+                    <Loader2 className="h-9 w-9 animate-spin text-emerald-300" />
+                    <div>
+                      <div className="text-base font-semibold text-zinc-100">Loading engine model...</div>
+                      <div className="mt-1 text-sm text-zinc-400">The first move can take a moment on Render.</div>
+                    </div>
+                  </div>
+                )}
 
                 {showPromotionDialog && (
                   <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/50 rounded-lg">
@@ -523,7 +598,10 @@ export default function ChessHybridApp() {
               <CardTitle className="flex items-center gap-2 text-lg text-zinc-100"><Brain className="h-5 w-5" /> Game Status</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="rounded-2xl border border-zinc-800 bg-zinc-950 py-3 px-4 text-sm font-medium text-zinc-300">{status}</div>
+              <div className="flex items-center gap-2 rounded-2xl border border-zinc-800 bg-zinc-950 py-3 px-4 text-sm font-medium text-zinc-300">
+                {engineWaking && <Loader2 className="h-4 w-4 animate-spin text-emerald-300" />}
+                <span>{status}</span>
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <div className="mb-2 text-sm text-zinc-400 pl-1">Play as</div>
@@ -561,7 +639,7 @@ export default function ChessHybridApp() {
                 }}>
                   <RotateCcw className="mr-2 h-4 w-4" /> New AI Game
                 </Button>
-                <Button className="flex-1 rounded-xl bg-zinc-800 text-zinc-100 hover:bg-zinc-700 py-2.5 flex justify-center items-center font-medium" onClick={maybePlayEngine} disabled={engineThinking || isMultiplayer}>
+                <Button className="flex-1 rounded-xl bg-zinc-800 text-zinc-100 hover:bg-zinc-700 py-2.5 flex justify-center items-center font-medium" onClick={maybePlayEngine} disabled={engineThinking || isMultiplayer || engineWaking}>
                   <Zap className="mr-2 h-4 w-4" /> AI Move
                 </Button>
               </div>
