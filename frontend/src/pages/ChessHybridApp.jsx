@@ -30,6 +30,10 @@ function buildWebSocketUrl(roomId) {
   }
 }
 
+function normalizeFen(fen) {
+  return String(fen || "").trim().split(/\s+/).join(" ");
+}
+
 function pieceValue(piece) {
   if (!piece) return 0;
   switch (piece.type) {
@@ -147,6 +151,7 @@ export default function ChessHybridApp() {
   const [engineThinking, setEngineThinking] = useState(false);
   const [engineWarmupStatus, setEngineWarmupStatus] = useState("idle");
   const [lastMoveSquares, setLastMoveSquares] = useState({});
+  const [lastMoveNote, setLastMoveNote] = useState("");
   const [moveFrom, setMoveFrom] = useState("");
   const [optionSquares, setOptionSquares] = useState({});
 
@@ -208,6 +213,18 @@ export default function ChessHybridApp() {
     setMoveHistory(game.history({ verbose: true }).map(formatHistoryMove));
   }
 
+  function loadAuthoritativeFen(nextFen, context) {
+    if (!nextFen) return false;
+    try {
+      game.load(nextFen);
+      syncGame();
+      return true;
+    } catch (err) {
+      console.error("Failed to load authoritative FEN", { context, nextFen, err });
+      return false;
+    }
+  }
+
   function moveToUci(move) {
     return `${move.from}${move.to}${move.promotion || ""}`;
   }
@@ -223,8 +240,48 @@ export default function ChessHybridApp() {
         background: "rgba(239, 68, 68, 0.38)",
         boxShadow: "inset 0 0 0 3px rgba(248, 113, 113, 0.75)",
       };
+      setLastMoveNote(`${formatHistoryMove(move)} captured en passant on ${capturedSquare}`);
+    } else {
+      setLastMoveNote("");
     }
     setLastMoveSquares(styles);
+  }
+
+  function applyEngineMove(uci, authoritativeFen) {
+    const from = uci.slice(0, 2);
+    const to = uci.slice(2, 4);
+    const moveDetails = { from, to };
+    if (uci.length === 5) {
+      moveDetails.promotion = uci[4];
+    } else {
+      moveDetails.promotion = "q";
+    }
+
+    let move;
+    try {
+      move = game.move(moveDetails);
+    } catch (err) {
+      if (loadAuthoritativeFen(authoritativeFen, "engine-move-error")) return;
+      throw err;
+    }
+
+    if (!move) {
+      loadAuthoritativeFen(authoritativeFen, "engine-move-null");
+      return;
+    }
+
+    highlightLastMove(move);
+    syncGame();
+    playMoveSoundFor(move, game);
+
+    if (authoritativeFen && normalizeFen(game.fen()) !== normalizeFen(authoritativeFen)) {
+      console.warn("Frontend/backend FEN mismatch after engine move", {
+        uci,
+        localFen: game.fen(),
+        authoritativeFen,
+      });
+      loadAuthoritativeFen(authoritativeFen, "engine-move-mismatch");
+    }
   }
 
   async function warmupEngineServer() {
@@ -265,37 +322,39 @@ export default function ChessHybridApp() {
 
       const engineDepth = Number(depth);
       const candidateCount = Math.max(10, Math.min(16, engineDepth * 3));
+      const requestFen = game.fen();
       const res = await fetch(`${API_BASE_URL}/fastmove`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          fen: game.fen(),
+          fen: requestFen,
           topk: candidateCount,
           depth: engineDepth,
           max_simulations: 96,
           adaptive: true
         })
       });
+      if (!res.ok) throw new Error(`Engine request failed: ${res.status}`);
       const data = await res.json();
 
       const uci = data.move || data.moves?.[0]?.uci || data.best_move;
       if (uci) {
-        const from = uci.slice(0, 2);
-        const to = uci.slice(2, 4);
-        
-        const moveDetails = { from, to };
-        if (uci.length === 5) {
-          moveDetails.promotion = uci[4];
-        } else {
-          moveDetails.promotion = 'q';
+        if (normalizeFen(game.fen()) !== normalizeFen(requestFen)) {
+          console.warn("Ignoring stale engine response", {
+            uci,
+            requestFen,
+            currentFen: game.fen(),
+          });
+          return;
         }
-
-        const move = game.move(moveDetails);
-        if (move) {
-          highlightLastMove(move);
-          syncGame();
-          playMoveSoundFor(move, game);
+        if (data.fen_before && normalizeFen(data.fen_before) !== normalizeFen(requestFen)) {
+          console.warn("Engine response FEN does not match request FEN", {
+            uci,
+            requestFen,
+            responseFen: data.fen_before,
+          });
         }
+        applyEngineMove(uci, data.fen_after);
       }
     } catch (err) {
       console.error('Engine request failed', err);
@@ -492,6 +551,7 @@ export default function ChessHybridApp() {
   function newGame(nextColor = playerColor) {
     safeGameMutate((g) => g.reset());
     setLastMoveSquares({});
+    setLastMoveNote("");
     setMoveFrom("");
     setOptionSquares({});
     setPlayerColor(nextColor);
@@ -602,10 +662,15 @@ export default function ChessHybridApp() {
                 {engineWaking && <Loader2 className="h-4 w-4 animate-spin text-emerald-300" />}
                 <span>{status}</span>
               </div>
+              {lastMoveNote && (
+                <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm font-medium text-red-200">
+                  {lastMoveNote}
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <div className="mb-2 text-sm text-zinc-400 pl-1">Play as</div>
-                  <Select value={playerColor} onValueChange={(value) => newGame(value)}>
+                  <Select value={playerColor} onValueChange={(value) => newGame(value)} disabled={engineThinking}>
                     <SelectTrigger className="w-full justify-between rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200">
                       <SelectValue />
                     </SelectTrigger>
@@ -617,7 +682,7 @@ export default function ChessHybridApp() {
                 </div>
                 <div>
                   <div className="mb-2 text-sm text-zinc-400 pl-1">Depth</div>
-                  <Select value={depth} onValueChange={setDepth}>
+                  <Select value={depth} onValueChange={setDepth} disabled={engineThinking}>
                     <SelectTrigger className="w-full justify-between rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200">
                       <SelectValue />
                     </SelectTrigger>
@@ -633,7 +698,7 @@ export default function ChessHybridApp() {
                 </div>
               </div>
               <div className="flex gap-3 pt-2">
-                <Button className="flex-1 rounded-xl bg-zinc-100 text-zinc-900 hover:bg-zinc-200 py-2.5 flex justify-center items-center font-medium" onClick={() => {
+                <Button className="flex-1 rounded-xl bg-zinc-100 text-zinc-900 hover:bg-zinc-200 py-2.5 flex justify-center items-center font-medium disabled:cursor-not-allowed disabled:opacity-60" disabled={engineThinking} onClick={() => {
                   setIsMultiplayer(false);
                   newGame(playerColor);
                 }}>
@@ -647,10 +712,10 @@ export default function ChessHybridApp() {
               <div className="flex gap-3 pt-2 border-t border-zinc-800">
                 {!isMultiplayer ? (
                   <>
-                    <Button className="flex-1 rounded-xl bg-emerald-600 text-white hover:bg-emerald-500 py-2.5" onClick={startMultiplayer}>
+                    <Button className="flex-1 rounded-xl bg-emerald-600 text-white hover:bg-emerald-500 py-2.5 disabled:cursor-not-allowed disabled:opacity-60" disabled={engineThinking} onClick={startMultiplayer}>
                       <Globe className="mr-2 h-4 w-4" /> Host online
                     </Button>
-                    <Button className="flex-1 rounded-xl bg-indigo-600 text-white hover:bg-indigo-500 py-2.5" onClick={joinMultiplayer}>
+                    <Button className="flex-1 rounded-xl bg-indigo-600 text-white hover:bg-indigo-500 py-2.5 disabled:cursor-not-allowed disabled:opacity-60" disabled={engineThinking} onClick={joinMultiplayer}>
                       <Users className="mr-2 h-4 w-4" /> Join 
                     </Button>
                   </>
