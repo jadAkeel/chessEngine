@@ -1,5 +1,9 @@
 # Kaggle External Training
 
+Use the normal `requirements.txt` for local/backend server hosting. It pins the CPU PyTorch wheel on purpose for predictable deployment.
+
+Use `requirements2_kaggle.txt` for Kaggle/Colab training. It installs the project dependencies but intentionally leaves PyTorch alone so the notebook runtime keeps its CUDA-enabled torch build. Set the notebook accelerator to GPU before running from the top.
+
 Use a copied config on Kaggle with absolute input and output paths:
 
 ```yaml
@@ -53,7 +57,7 @@ python scripts/kaggle_train_external.py \
   --delete-old-versions
 ```
 
-Add `--install-requirements` if the Kaggle image is missing backend Python dependencies and internet access is enabled.
+Add `--install-requirements` if the Kaggle image is missing backend Python dependencies and internet access is enabled. This installs `requirements2_kaggle.txt`, which intentionally does not reinstall PyTorch so Kaggle keeps its CUDA-enabled torch build.
 
 For a first Kaggle smoke check:
 

@@ -159,6 +159,27 @@ def ensure_clean_project_dir():
         shutil.rmtree(PROJECT_DIR)
 
 
+def verify_training_runtime():
+    import torch
+
+    print("[TORCH] version =", torch.__version__, flush=True)
+    print("[TORCH] cuda build =", torch.version.cuda, flush=True)
+    print("[TORCH] cuda available =", torch.cuda.is_available(), flush=True)
+    try:
+        run(["nvidia-smi"], check=False)
+    except FileNotFoundError:
+        print("[WARN] nvidia-smi not found", flush=True)
+
+    if DEVICE == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(
+            "DEVICE='cuda' but PyTorch CUDA is unavailable. "
+            "Enable a Colab GPU runtime and install requirements2_kaggle.txt, "
+            "not requirements.txt."
+        )
+    if DEVICE == "cuda":
+        print("[TORCH] gpu =", torch.cuda.get_device_name(0), flush=True)
+
+
 if AUTOSAVE_MODE != "kaggle":
     raise ValueError("AUTOSAVE_MODE must be 'kaggle' so checkpoints are versioned in the Kaggle Dataset.")
 if AUTOSAVE_EVERY != 1:
@@ -206,7 +227,8 @@ BACKEND_DIR = PROJECT_DIR / "backend"
 if not BACKEND_DIR.exists():
     raise FileNotFoundError(f"GitHub backend directory not found: {BACKEND_DIR}")
 
-run([sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt"], cwd=BACKEND_DIR)
+run([sys.executable, "-m", "pip", "install", "-q", "-r", "requirements2_kaggle.txt"], cwd=BACKEND_DIR)
+verify_training_runtime()
 
 BASE_MODEL = None
 if RESOLVED_CHECKPOINT_INPUT_DIR:

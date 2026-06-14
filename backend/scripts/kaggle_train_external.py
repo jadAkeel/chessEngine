@@ -15,6 +15,7 @@ DEFAULT_KAGGLE_DATASET_ID = os.environ.get("KAGGLE_CHECKPOINT_DATASET_ID", "jada
 DEFAULT_SAVE_DIR = "/kaggle/working/checkpoints"
 DEFAULT_CONFIG_PATH = "/kaggle/working/external_training_kaggle.yaml"
 DEFAULT_AUTOSAVE_DIR = "/kaggle/working/autosaves"
+TRAINING_REQUIREMENTS_FILE = "requirements2_kaggle.txt"
 REQUIRED_AUTOSAVE_FILES = (
     "external_latest_checkpoint.pth",
     "external_best_model.pth",
@@ -32,6 +33,26 @@ def _run(cmd: list[str], *, cwd: Path, env: dict[str, str], check: bool = True) 
     if check and result.returncode != 0:
         raise RuntimeError(f"Command failed with exit code {result.returncode}: {' '.join(cmd)}")
     return result
+
+
+def _verify_training_runtime(device: str, env: dict[str, str]) -> None:
+    import torch
+
+    print(f"[TORCH] version={torch.__version__}", flush=True)
+    print(f"[TORCH] cuda_build={torch.version.cuda}", flush=True)
+    print(f"[TORCH] cuda_available={torch.cuda.is_available()}", flush=True)
+    try:
+        _run(["nvidia-smi"], cwd=_backend_dir(), env=env, check=False)
+    except FileNotFoundError:
+        print("[WARN] nvidia-smi not found", flush=True)
+
+    if str(device) == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(
+            "DEVICE='cuda' but PyTorch CUDA is unavailable. "
+            "Enable a GPU accelerator and install requirements2_kaggle.txt, not requirements.txt."
+        )
+    if str(device) == "cuda":
+        print(f"[TORCH] gpu={torch.cuda.get_device_name(0)}", flush=True)
 
 
 def _yaml_string(value: str | Path) -> str:
@@ -349,7 +370,10 @@ def main() -> None:
     env.setdefault("PYTHONIOENCODING", "utf-8")
 
     if args.install_requirements:
-        _run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], cwd=_backend_dir(), env=env)
+        _run([sys.executable, "-m", "pip", "install", "-r", TRAINING_REQUIREMENTS_FILE], cwd=_backend_dir(), env=env)
+
+    if args.device == "cuda":
+        _verify_training_runtime(args.device, env)
 
     config_path = _write_config(args)
     base_model = _copy_checkpoint_inputs(args)

@@ -113,6 +113,26 @@ def link_path_if_available(src, dst):
         print(f"[WARN] could not symlink {dst} -> {src}: {exc}", flush=True)
         return False
 
+def verify_training_runtime():
+    import torch
+
+    print("[TORCH] version =", torch.__version__, flush=True)
+    print("[TORCH] cuda build =", torch.version.cuda, flush=True)
+    print("[TORCH] cuda available =", torch.cuda.is_available(), flush=True)
+    try:
+        run(["nvidia-smi"], check=False)
+    except FileNotFoundError:
+        print("[WARN] nvidia-smi not found", flush=True)
+
+    if DEVICE == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(
+            "DEVICE='cuda' but PyTorch CUDA is unavailable. "
+            "Enable a Kaggle GPU accelerator and install requirements2_kaggle.txt, "
+            "not requirements.txt."
+        )
+    if DEVICE == "cuda":
+        print("[TORCH] gpu =", torch.cuda.get_device_name(0), flush=True)
+
 if AUTOSAVE_MODE != "kaggle":
     raise ValueError("AUTOSAVE_MODE must be 'kaggle' so checkpoints are versioned in the Kaggle Dataset.")
 if AUTOSAVE_EVERY != 1:
@@ -186,7 +206,8 @@ if not BACKEND_DIR.exists():
 os.chdir(BACKEND_DIR)
 print("CWD =", Path.cwd())
 
-run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], cwd=BACKEND_DIR)
+run([sys.executable, "-m", "pip", "install", "-r", "requirements2_kaggle.txt"], cwd=BACKEND_DIR)
+verify_training_runtime()
 
 link_path_if_available(SAMPLES_PATH, BACKEND_DIR / "data" / "external_samples.npz")
 
