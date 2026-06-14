@@ -5,6 +5,7 @@ from app.api.main import (
     _fastmove_complexity,
     _find_mate_in_one,
     _move_allows_mate_in_one,
+    _should_use_adaptive_search,
 )
 
 
@@ -34,6 +35,17 @@ def test_adaptive_simulations_raise_budget_for_complex_positions():
     assert _adaptive_simulations(depth=6, complexity=3, max_simulations=96) == 28
     assert _adaptive_simulations(depth=6, complexity=8, max_simulations=96) == 72
     assert _adaptive_simulations(depth=10, complexity=8, max_simulations=96) == 96
+
+
+def test_adaptive_search_skips_quiet_close_policy_scores():
+    assert _should_use_adaptive_search(3, ["top_moves_very_close"], depth=6) is False
+    assert _should_use_adaptive_search(4, ["top_moves_close", "forcing_moves_available"], depth=6) is False
+
+
+def test_adaptive_search_runs_for_tactical_urgency():
+    assert _should_use_adaptive_search(3, ["king_in_check"], depth=6) is True
+    assert _should_use_adaptive_search(4, ["best_fast_move_allows_mate"], depth=6) is True
+    assert _should_use_adaptive_search(6, ["many_forcing_moves", "top_moves_close"], depth=6) is True
 
 
 def test_complexity_marks_check_as_forcing_position():

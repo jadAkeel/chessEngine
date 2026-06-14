@@ -362,6 +362,31 @@ def _adaptive_simulations(depth: int | None, complexity: int, max_simulations: i
     return min(cap, max(1, simulations))
 
 
+def _should_use_adaptive_search(complexity: int, reasons: list[str], depth: int | None) -> bool:
+    reason_set = set(reasons)
+
+    if 'king_in_check' in reason_set or 'best_fast_move_allows_mate' in reason_set:
+        return True
+    if complexity >= 6:
+        return True
+    if 'few_legal_moves' in reason_set and reason_set.intersection({
+        'forcing_moves_available',
+        'many_forcing_moves',
+        'top_moves_close',
+        'top_moves_very_close',
+        'high_value_capture',
+    }):
+        return True
+    if 'top_moves_very_close' in reason_set and reason_set.intersection({
+        'many_forcing_moves',
+        'high_value_capture',
+    }):
+        return True
+    if int(depth or 6) >= 8 and complexity >= 4:
+        return True
+    return False
+
+
 def _fast_policy_move(board: chess.Board, logits, topk: int) -> tuple[str, str, list[dict]]:
     scored: list[dict] = []
 
@@ -555,7 +580,8 @@ def fastmove(req: FastMoveRequest):
     rank_ms = _elapsed_ms(rank_start)
     fast_move, fast_san = move, san
     complexity, adaptive_reasons = _fastmove_complexity(board, candidates)
-    simulations = _adaptive_simulations(req.depth, complexity, req.max_simulations) if req.adaptive else 0
+    use_adaptive_search = bool(req.adaptive and _should_use_adaptive_search(complexity, adaptive_reasons, req.depth))
+    simulations = _adaptive_simulations(req.depth, complexity, req.max_simulations) if use_adaptive_search else 0
     search_ms = 0.0
     source = 'fast_policy'
 
@@ -582,7 +608,7 @@ def fastmove(req: FastMoveRequest):
         f"/fastmove TIMING | move={move} | source={source} | validate_ms={validate_ms} | "
         f"predict_ms={predict_ms} | rank_ms={rank_ms} | search_ms={search_ms} | "
         f"total_ms={total_ms} | candidates={len(candidates)} | complexity={complexity} | "
-        f"sims={simulations} | reasons={adaptive_reasons}"
+        f"adaptive_search={use_adaptive_search} | sims={simulations} | reasons={adaptive_reasons}"
     )
 
     return {
@@ -595,6 +621,7 @@ def fastmove(req: FastMoveRequest):
             'depth': int(req.depth or 6),
             'complexity': complexity,
             'reasons': adaptive_reasons,
+            'search': use_adaptive_search,
             'simulations': simulations,
             'max_simulations': req.max_simulations,
         },
