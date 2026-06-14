@@ -126,7 +126,7 @@ export default function ChessHybridApp() {
   const [fen, setFen] = useState(gameRef.current.fen());
   const [moveHistory, setMoveHistory] = useState([]);
   const [playerColor, setPlayerColor] = useState("w");
-  const [depth, setDepth] = useState("3");
+  const [depth, setDepth] = useState("6");
   const [engineThinking, setEngineThinking] = useState(false);
   const [lastMoveSquares, setLastMoveSquares] = useState({});
   const [moveFrom, setMoveFrom] = useState("");
@@ -200,11 +200,18 @@ export default function ChessHybridApp() {
 
     setEngineThinking(true);
     try {
-      const candidateCount = Math.max(6, Math.min(14, Number(depth) * 2));
+      const engineDepth = Number(depth);
+      const candidateCount = Math.max(12, Math.min(24, engineDepth * 4));
       const res = await fetch(`${API_BASE_URL}/fastmove`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fen: game.fen(), topk: candidateCount })
+        body: JSON.stringify({
+          fen: game.fen(),
+          topk: candidateCount,
+          depth: engineDepth,
+          max_simulations: 180,
+          adaptive: true
+        })
       });
       const data = await res.json();
 
