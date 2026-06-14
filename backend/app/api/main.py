@@ -243,6 +243,56 @@ def _score_fast_candidate(board: chess.Board, move: chess.Move, policy_prob: flo
     return score
 
 
+def _captured_value_for_move(board: chess.Board, move: chess.Move) -> int:
+    if board.is_en_passant(move):
+        return _piece_value(chess.PAWN)
+
+    captured_piece = board.piece_at(move.to_square)
+    if captured_piece is None:
+        return 0
+    return _piece_value(captured_piece.piece_type)
+
+
+def _is_decisive_fast_choice(board: chess.Board, candidates: list[dict], reasons: list[str]) -> bool:
+    reason_set = set(reasons)
+    if {'king_in_check', 'best_fast_move_allows_mate', 'best_fast_move_allows_mate_two'}.intersection(reason_set):
+        return False
+    if len(candidates) < 2:
+        return False
+
+    move = chess.Move.from_uci(candidates[0]['uci'])
+    if move not in board.legal_moves or _move_allows_mate_in_one(board, move.uci()):
+        return False
+
+    material_gain = _captured_value_for_move(board, move)
+    if move.promotion:
+        material_gain += _piece_value(move.promotion)
+    if material_gain < _piece_value(chess.BISHOP):
+        return False
+
+    moving_piece = board.piece_at(move.from_square)
+    moved_value = _piece_value(move.promotion or (moving_piece.piece_type if moving_piece else None))
+    candidate = board.copy(stack=False)
+    candidate.push(move)
+
+    destination_attacked = candidate.is_attacked_by(candidate.turn, move.to_square)
+    destination_defended = candidate.is_attacked_by(not candidate.turn, move.to_square)
+    clearly_profitable = (
+        not destination_attacked
+        or material_gain >= moved_value
+        or (destination_defended and material_gain >= moved_value + 200)
+    )
+    if not clearly_profitable:
+        return False
+
+    top_gap = float(candidates[0]['score']) - float(candidates[1]['score'])
+    if material_gain >= _piece_value(chess.QUEEN):
+        return top_gap >= 35.0
+    if material_gain >= _piece_value(chess.ROOK):
+        return top_gap >= 80.0
+    return top_gap >= 140.0
+
+
 def _find_mate_in_one(board: chess.Board) -> chess.Move | None:
     for move in board.legal_moves:
         candidate = board.copy(stack=False)
@@ -260,6 +310,40 @@ def _move_allows_mate_in_one(board: chess.Board, move_uci: str) -> bool:
     candidate = board.copy(stack=False)
     candidate.push(move)
     return _find_mate_in_one(candidate) is not None
+
+
+def _side_has_forced_mate_in_two(board: chess.Board) -> bool:
+    for attack_move in board.legal_moves:
+        candidate = board.copy(stack=False)
+        candidate.push(attack_move)
+        if candidate.is_checkmate():
+            return True
+        if not candidate.is_check():
+            continue
+
+        replies = list(candidate.legal_moves)
+        if replies and all(
+            _find_mate_in_one(_board_after_move(candidate, reply)) is not None
+            for reply in replies
+        ):
+            return True
+    return False
+
+
+def _move_allows_forced_mate_in_two(board: chess.Board, move_uci: str) -> bool:
+    move = chess.Move.from_uci(move_uci)
+    if move not in board.legal_moves:
+        return True
+
+    candidate = board.copy(stack=False)
+    candidate.push(move)
+    return _side_has_forced_mate_in_two(candidate)
+
+
+def _board_after_move(board: chess.Board, move: chess.Move) -> chess.Board:
+    candidate = board.copy(stack=False)
+    candidate.push(move)
+    return candidate
 
 
 def _is_forcing_move(board: chess.Board, move: chess.Move) -> bool:
@@ -314,6 +398,9 @@ def _fastmove_complexity(board: chess.Board, candidates: list[dict]) -> tuple[in
         if _find_mate_in_one(candidate) is not None:
             complexity += 4
             reasons.append('best_fast_move_allows_mate')
+        elif _side_has_forced_mate_in_two(candidate):
+            complexity += 4
+            reasons.append('best_fast_move_allows_mate_two')
 
     high_value_capture = False
     for move in legal_moves:
@@ -328,10 +415,35 @@ def _fastmove_complexity(board: chess.Board, candidates: list[dict]) -> tuple[in
     return complexity, reasons
 
 
-def _adaptive_simulations(depth: int | None, complexity: int, max_simulations: int | None = None) -> int:
+def _is_light_adaptive_search(complexity: int, reasons: list[str], depth: int | None) -> bool:
+    reason_set = set(reasons)
+    if int(depth or 6) > 6:
+        return False
+    if complexity > 4:
+        return False
+    if not {'forcing_moves_available', 'top_moves_very_close'}.issubset(reason_set):
+        return False
+    return not reason_set.intersection({
+        'king_in_check',
+        'best_fast_move_allows_mate',
+        'best_fast_move_allows_mate_two',
+        'few_legal_moves',
+        'many_forcing_moves',
+        'high_value_capture',
+    })
+
+
+def _adaptive_simulations(
+    depth: int | None,
+    complexity: int,
+    max_simulations: int | None = None,
+    light: bool = False,
+) -> int:
     depth = max(1, min(10, int(depth or 6)))
 
-    if complexity >= 8:
+    if light:
+        base = 8
+    elif complexity >= 8:
         base = 72
     elif complexity >= 6:
         base = 56
@@ -359,13 +471,19 @@ def _adaptive_simulations(depth: int | None, complexity: int, max_simulations: i
     simulations = int(round(base * depth_factor))
 
     cap = 120 if max_simulations is None else max(0, min(180, int(max_simulations)))
+    if light:
+        cap = min(cap, 16)
     return min(cap, max(1, simulations))
 
 
 def _should_use_adaptive_search(complexity: int, reasons: list[str], depth: int | None) -> bool:
     reason_set = set(reasons)
 
-    if 'king_in_check' in reason_set or 'best_fast_move_allows_mate' in reason_set:
+    if (
+        'king_in_check' in reason_set
+        or 'best_fast_move_allows_mate' in reason_set
+        or 'best_fast_move_allows_mate_two' in reason_set
+    ):
         return True
     if complexity >= 6:
         return True
@@ -595,8 +713,21 @@ def fastmove(req: FastMoveRequest):
     rank_ms = _elapsed_ms(rank_start)
     fast_move, fast_san = move, san
     complexity, adaptive_reasons = _fastmove_complexity(board, candidates)
-    use_adaptive_search = bool(req.adaptive and _should_use_adaptive_search(complexity, adaptive_reasons, req.depth))
-    simulations = _adaptive_simulations(req.depth, complexity, req.max_simulations) if use_adaptive_search else 0
+    decisive_fast_choice = _is_decisive_fast_choice(board, candidates, adaptive_reasons)
+    use_adaptive_search = bool(
+        req.adaptive
+        and not decisive_fast_choice
+        and _should_use_adaptive_search(complexity, adaptive_reasons, req.depth)
+    )
+    light_adaptive_search = bool(
+        use_adaptive_search
+        and _is_light_adaptive_search(complexity, adaptive_reasons, req.depth)
+    )
+    simulations = (
+        _adaptive_simulations(req.depth, complexity, req.max_simulations, light=light_adaptive_search)
+        if use_adaptive_search
+        else 0
+    )
     search_ms = 0.0
     source = 'fast_policy'
 
@@ -604,12 +735,22 @@ def fastmove(req: FastMoveRequest):
         search_start = time.perf_counter()
         try:
             mcts_move, mcts_san = _best_move_with_mcts(model, board, _get_device(), simulations)
-            if _move_allows_mate_in_one(board, mcts_move) and not _move_allows_mate_in_one(board, fast_move):
+            mcts_allows_mate_one = _move_allows_mate_in_one(board, mcts_move)
+            fast_allows_mate_one = _move_allows_mate_in_one(board, fast_move)
+            mcts_allows_mate_two = _move_allows_forced_mate_in_two(board, mcts_move)
+            fast_allows_mate_two = _move_allows_forced_mate_in_two(board, fast_move)
+            if mcts_allows_mate_one and not fast_allows_mate_one:
                 logger.warning(
                     f"/fastmove MCTS rejected unsafe move={mcts_move}; "
                     f"fallback={fast_move}"
                 )
                 source = 'adaptive_mcts_rejected'
+            elif mcts_allows_mate_two and not fast_allows_mate_two:
+                logger.warning(
+                    f"/fastmove MCTS rejected mate-in-two risk move={mcts_move}; "
+                    f"fallback={fast_move}"
+                )
+                source = 'adaptive_mcts_rejected_mate_two'
             else:
                 move, san = mcts_move, mcts_san
                 source = 'adaptive_mcts'
@@ -623,7 +764,8 @@ def fastmove(req: FastMoveRequest):
         f"/fastmove TIMING | move={move} | source={source} | validate_ms={validate_ms} | "
         f"predict_ms={predict_ms} | rank_ms={rank_ms} | search_ms={search_ms} | "
         f"total_ms={total_ms} | candidates={len(candidates)} | complexity={complexity} | "
-        f"adaptive_search={use_adaptive_search} | sims={simulations} | reasons={adaptive_reasons}"
+        f"adaptive_search={use_adaptive_search} | decisive_fast={decisive_fast_choice} | "
+        f"light_adaptive={light_adaptive_search} | sims={simulations} | reasons={adaptive_reasons}"
     )
 
     return {
@@ -637,6 +779,8 @@ def fastmove(req: FastMoveRequest):
             'complexity': complexity,
             'reasons': adaptive_reasons,
             'search': use_adaptive_search,
+            'decisive_fast': decisive_fast_choice,
+            'light_adaptive': light_adaptive_search,
             'simulations': simulations,
             'max_simulations': req.max_simulations,
         },
