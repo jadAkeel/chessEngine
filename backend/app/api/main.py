@@ -382,6 +382,21 @@ def _should_use_adaptive_search(complexity: int, reasons: list[str], depth: int 
         'high_value_capture',
     }):
         return True
+    if complexity >= 4 and 'many_forcing_moves' in reason_set and reason_set.intersection({
+        'top_moves_close',
+        'top_moves_very_close',
+        'high_value_capture',
+    }):
+        return True
+    if complexity >= 4 and 'high_value_capture' in reason_set and reason_set.intersection({
+        'many_forcing_moves',
+        'top_moves_competitive',
+        'top_moves_close',
+        'top_moves_very_close',
+    }):
+        return True
+    if complexity >= 4 and 'top_moves_very_close' in reason_set and 'forcing_moves_available' in reason_set:
+        return True
     if int(depth or 6) >= 8 and complexity >= 4:
         return True
     return False

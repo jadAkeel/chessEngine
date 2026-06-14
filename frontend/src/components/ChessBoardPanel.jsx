@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react'
+import React, { useEffect, useState, useRef } from 'react'
 import { Chessboard } from 'react-chessboard'
 import { Chess } from 'chess.js'
 import { playMoveSoundFor } from '@/utils/sound'
@@ -12,10 +12,45 @@ export default function ChessBoardPanel() {
   const gameRef = useRef(new Chess())
   const [fen, setFen] = useState(gameRef.current.fen())
   const [thinking, setThinking] = useState(false)
+  const [engineWarmupStatus, setEngineWarmupStatus] = useState('idle')
+  const engineWarmupPromiseRef = useRef(null)
+
+  const warmupEngineServer = async () => {
+    if (engineWarmupStatus === 'ready') return true
+    if (engineWarmupPromiseRef.current) return engineWarmupPromiseRef.current
+
+    setEngineWarmupStatus('waking')
+    const warmupPromise = fetch(`${API_BASE_URL}/health`, { cache: 'no-store' })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`Health check failed: ${res.status}`)
+        const data = await res.json().catch(() => ({}))
+        if (data.model === false) throw new Error('Model is not loaded')
+        setEngineWarmupStatus('ready')
+        return true
+      })
+      .catch((err) => {
+        console.error('Engine warmup failed', err)
+        setEngineWarmupStatus('error')
+        return false
+      })
+      .finally(() => {
+        engineWarmupPromiseRef.current = null
+      })
+
+    engineWarmupPromiseRef.current = warmupPromise
+    return warmupPromise
+  }
+
+  useEffect(() => {
+    void warmupEngineServer()
+  }, [])
 
   const makeEngineMove = async (currentFen) => {
     setThinking(true)
     try {
+      const serverReady = await warmupEngineServer()
+      if (!serverReady) return
+
       const res = await fetch(`${API_BASE_URL}/fastmove`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -48,8 +83,10 @@ export default function ChessBoardPanel() {
 
   return (
     <div>
-      <div style={{ marginBottom: 8 }}>Thinking: {thinking ? 'Yes' : 'No'}</div>
-      <Chessboard position={fen} onPieceDrop={onDrop} />
+      <div style={{ marginBottom: 8 }}>
+        {engineWarmupStatus === 'waking' ? 'Loading engine model...' : `Thinking: ${thinking ? 'Yes' : 'No'}`}
+      </div>
+      <Chessboard position={fen} onPieceDrop={onDrop} arePiecesDraggable={!thinking && engineWarmupStatus !== 'waking'} />
     </div>
   )
 }
