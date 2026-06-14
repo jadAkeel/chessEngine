@@ -16,13 +16,13 @@ export default function ChessBoardPanel() {
   const makeEngineMove = async (currentFen) => {
     setThinking(true)
     try {
-      const res = await fetch(`${API_BASE_URL}/bestmove`, {
+      const res = await fetch(`${API_BASE_URL}/predict`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fen: currentFen, simulations: 24 })
+        body: JSON.stringify({ fen: currentFen, topk: 1 })
       })
       const data = await res.json()
-      const uci = data.move || data.best_move
+      const uci = data.moves?.[0]?.uci || data.move || data.best_move
       if (uci) {
         const from = uci.slice(0, 2)
         const to = uci.slice(2, 4)
