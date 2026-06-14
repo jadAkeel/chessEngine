@@ -87,7 +87,7 @@ class FenRequest(BaseModel):
 
 
 class BestMoveRequest(FenRequest):
-    simulations: int | None = Field(default=None, ge=1, le=5000)
+    simulations: int | None = Field(default=None, ge=1, le=80)
 
 
 class PredictRequest(FenRequest):

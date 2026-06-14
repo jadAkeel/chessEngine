@@ -57,7 +57,7 @@ principle_penalties:
 
 
 mcts:
-  num_simulations: 512
+  num_simulations: 64
   c_puct: 1.8
   dirichlet_alpha: 0.25
   dirichlet_eps: 0.25
@@ -134,6 +134,6 @@ system:
   log_level: INFO
   json_logs: false
   checkpoint_path: models/best_model.pth
-  default_bestmove_simulations: 512
+  default_bestmove_simulations: 32
   max_halfmove: 80
   max_fullmove: 120

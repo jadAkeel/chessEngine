@@ -19,7 +19,7 @@ export default function ChessBoardPanel() {
       const res = await fetch(`${API_BASE_URL}/bestmove`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fen: currentFen, simulations: 128 })
+        body: JSON.stringify({ fen: currentFen, simulations: 24 })
       })
       const data = await res.json()
       const uci = data.move || data.best_move
