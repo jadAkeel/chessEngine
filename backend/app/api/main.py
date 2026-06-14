@@ -95,7 +95,10 @@ class PredictRequest(FenRequest):
 
 
 class FastMoveRequest(FenRequest):
-    topk: int | None = Field(default=8, ge=1, le=24)
+    topk: int | None = Field(default=18, ge=1, le=48)
+    depth: int | None = Field(default=6, ge=1, le=10)
+    max_simulations: int | None = Field(default=None, ge=0, le=240)
+    adaptive: bool = True
 
 
 class MoveRequest(FenRequest):
@@ -219,6 +222,8 @@ def _score_fast_candidate(board: chess.Board, move: chess.Move, policy_prob: flo
 
     if candidate.is_checkmate():
         return score + 100000.0
+    if _find_mate_in_one(candidate) is not None:
+        score -= 50000.0
     if candidate.is_check():
         score += 60.0
 
@@ -236,6 +241,125 @@ def _score_fast_candidate(board: chess.Board, move: chess.Move, policy_prob: flo
         score += 15.0
 
     return score
+
+
+def _find_mate_in_one(board: chess.Board) -> chess.Move | None:
+    for move in board.legal_moves:
+        candidate = board.copy(stack=False)
+        candidate.push(move)
+        if candidate.is_checkmate():
+            return move
+    return None
+
+
+def _move_allows_mate_in_one(board: chess.Board, move_uci: str) -> bool:
+    move = chess.Move.from_uci(move_uci)
+    if move not in board.legal_moves:
+        return True
+
+    candidate = board.copy(stack=False)
+    candidate.push(move)
+    return _find_mate_in_one(candidate) is not None
+
+
+def _is_forcing_move(board: chess.Board, move: chess.Move) -> bool:
+    if board.is_capture(move) or move.promotion:
+        return True
+
+    candidate = board.copy(stack=False)
+    candidate.push(move)
+    return candidate.is_check()
+
+
+def _fastmove_complexity(board: chess.Board, candidates: list[dict]) -> tuple[int, list[str]]:
+    legal_moves = list(board.legal_moves)
+    complexity = 0
+    reasons: list[str] = []
+
+    if board.is_check():
+        complexity += 3
+        reasons.append('king_in_check')
+
+    if len(legal_moves) <= 8:
+        complexity += 2
+        reasons.append('few_legal_moves')
+    elif len(legal_moves) <= 14:
+        complexity += 1
+        reasons.append('limited_legal_moves')
+
+    forcing_count = sum(1 for move in legal_moves if _is_forcing_move(board, move))
+    if forcing_count >= 5:
+        complexity += 2
+        reasons.append('many_forcing_moves')
+    elif forcing_count >= 2:
+        complexity += 1
+        reasons.append('forcing_moves_available')
+
+    if len(candidates) >= 2:
+        top_gap = float(candidates[0]['score']) - float(candidates[1]['score'])
+        if top_gap <= 35.0:
+            complexity += 3
+            reasons.append('top_moves_very_close')
+        elif top_gap <= 80.0:
+            complexity += 2
+            reasons.append('top_moves_close')
+        elif top_gap <= 160.0:
+            complexity += 1
+            reasons.append('top_moves_competitive')
+
+    if candidates:
+        best_move = chess.Move.from_uci(candidates[0]['uci'])
+        candidate = board.copy(stack=False)
+        candidate.push(best_move)
+        if _find_mate_in_one(candidate) is not None:
+            complexity += 4
+            reasons.append('best_fast_move_allows_mate')
+
+    high_value_capture = False
+    for move in legal_moves:
+        captured_piece = board.piece_at(move.to_square)
+        if captured_piece is not None and _piece_value(captured_piece.piece_type) >= _piece_value(chess.ROOK):
+            high_value_capture = True
+            break
+    if high_value_capture:
+        complexity += 1
+        reasons.append('high_value_capture')
+
+    return complexity, reasons
+
+
+def _adaptive_simulations(depth: int | None, complexity: int, max_simulations: int | None = None) -> int:
+    depth = max(1, min(10, int(depth or 6)))
+
+    if complexity >= 8:
+        base = 120
+    elif complexity >= 6:
+        base = 96
+    elif complexity >= 4:
+        base = 72
+    elif complexity >= 3:
+        base = 48
+    elif complexity >= 2 and depth >= 6:
+        base = 32
+    else:
+        return 0
+
+    depth_factor = {
+        1: 0.35,
+        2: 0.50,
+        3: 0.65,
+        4: 0.85,
+        5: 1.00,
+        6: 1.25,
+        7: 1.45,
+        8: 1.65,
+        9: 1.85,
+        10: 2.00,
+    }[depth]
+    simulations = int(round(base * depth_factor))
+
+    cap = 240 if max_simulations is None else max(0, min(240, int(max_simulations)))
+    return min(cap, max(1, simulations))
 
 
 def _fast_policy_move(board: chess.Board, logits, topk: int) -> tuple[str, str, list[dict]]:
@@ -378,7 +502,10 @@ def predict(req: PredictRequest):
 @app.post('/fastmove')
 def fastmove(req: FastMoveRequest):
     total_start = time.perf_counter()
-    logger.info(f"/fastmove START | topk={req.topk}")
+    logger.info(
+        f"/fastmove START | topk={req.topk} | depth={req.depth} | "
+        f"max_sims={req.max_simulations} | adaptive={req.adaptive}"
+    )
 
     model = _get_model()
     validate_start = time.perf_counter()
@@ -389,6 +516,35 @@ def fastmove(req: FastMoveRequest):
         logger.warning("/fastmove game over")
         raise HTTPException(400, 'Game over')
 
+    mate_move = _find_mate_in_one(board)
+    if mate_move is not None:
+        total_ms = _elapsed_ms(total_start)
+        logger.info(
+            f"/fastmove MATE_IN_ONE | move={mate_move.uci()} | "
+            f"validate_ms={validate_ms} | total_ms={total_ms}"
+        )
+        return {
+            'move': mate_move.uci(),
+            'san': board.san(mate_move),
+            'source': 'mate_in_one',
+            'value': None,
+            'candidates': [],
+            'adaptive': {
+                'depth': int(req.depth or 6),
+                'complexity': 999,
+                'reasons': ['mate_in_one'],
+                'simulations': 0,
+                'max_simulations': req.max_simulations,
+            },
+            'timing_ms': {
+                'validate': validate_ms,
+                'predict': 0.0,
+                'rank': 0.0,
+                'search': 0.0,
+                'total': total_ms,
+            },
+        }
+
     predict_start = time.perf_counter()
     with torch.no_grad():
         logits, value = model.predict(board, device=_get_device())
@@ -397,24 +553,56 @@ def fastmove(req: FastMoveRequest):
     rank_start = time.perf_counter()
     move, san, candidates = _fast_policy_move(board, logits, int(req.topk or 8))
     rank_ms = _elapsed_ms(rank_start)
+    fast_move, fast_san = move, san
+    complexity, adaptive_reasons = _fastmove_complexity(board, candidates)
+    simulations = _adaptive_simulations(req.depth, complexity, req.max_simulations) if req.adaptive else 0
+    search_ms = 0.0
+    source = 'fast_policy'
+
+    if simulations > 0:
+        search_start = time.perf_counter()
+        try:
+            mcts_move, mcts_san = _best_move_with_mcts(model, board, _get_device(), simulations)
+            if _move_allows_mate_in_one(board, mcts_move) and not _move_allows_mate_in_one(board, fast_move):
+                logger.warning(
+                    f"/fastmove MCTS rejected unsafe move={mcts_move}; "
+                    f"fallback={fast_move}"
+                )
+                source = 'adaptive_mcts_rejected'
+            else:
+                move, san = mcts_move, mcts_san
+                source = 'adaptive_mcts'
+        except Exception:
+            logger.exception("/fastmove adaptive MCTS failed; falling back to fast policy")
+        search_ms = _elapsed_ms(search_start)
+
     total_ms = _elapsed_ms(total_start)
 
     logger.info(
-        f"/fastmove TIMING | move={move} | validate_ms={validate_ms} | "
-        f"predict_ms={predict_ms} | rank_ms={rank_ms} | total_ms={total_ms} | "
-        f"candidates={len(candidates)}"
+        f"/fastmove TIMING | move={move} | source={source} | validate_ms={validate_ms} | "
+        f"predict_ms={predict_ms} | rank_ms={rank_ms} | search_ms={search_ms} | "
+        f"total_ms={total_ms} | candidates={len(candidates)} | complexity={complexity} | "
+        f"sims={simulations} | reasons={adaptive_reasons}"
     )
 
     return {
         'move': move,
         'san': san,
-        'source': 'fast_policy',
+        'source': source,
         'value': float(value),
         'candidates': candidates[:5],
+        'adaptive': {
+            'depth': int(req.depth or 6),
+            'complexity': complexity,
+            'reasons': adaptive_reasons,
+            'simulations': simulations,
+            'max_simulations': req.max_simulations,
+        },
         'timing_ms': {
             'validate': validate_ms,
             'predict': predict_ms,
             'rank': rank_ms,
+            'search': search_ms,
             'total': total_ms,
         },
     }
