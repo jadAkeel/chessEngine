@@ -94,6 +94,10 @@ class PredictRequest(FenRequest):
     topk: int | None = Field(default=5, ge=1, le=50)
 
 
+class FastMoveRequest(FenRequest):
+    topk: int | None = Field(default=8, ge=1, le=24)
+
+
 class MoveRequest(FenRequest):
     move: str
 
@@ -184,7 +188,81 @@ def _legal_moves_with_probs(board, logits, topk):
     return moves[:topk]
 
 
+def _elapsed_ms(start: float) -> float:
+    return round((time.perf_counter() - start) * 1000, 2)
+
+
+def _piece_value(piece_type: chess.PieceType | None) -> int:
+    values = {
+        chess.PAWN: 100,
+        chess.KNIGHT: 320,
+        chess.BISHOP: 330,
+        chess.ROOK: 500,
+        chess.QUEEN: 900,
+        chess.KING: 0,
+    }
+    return values.get(piece_type, 0)
+
+
+def _score_fast_candidate(board: chess.Board, move: chess.Move, policy_prob: float) -> float:
+    score = float(policy_prob) * 1000.0
+    moving_piece = board.piece_at(move.from_square)
+    captured_piece = board.piece_at(move.to_square)
+
+    if captured_piece is not None:
+        score += _piece_value(captured_piece.piece_type)
+    if move.promotion:
+        score += _piece_value(move.promotion)
+
+    candidate = board.copy(stack=False)
+    candidate.push(move)
+
+    if candidate.is_checkmate():
+        return score + 100000.0
+    if candidate.is_check():
+        score += 60.0
+
+    mover = not candidate.turn
+    destination = move.to_square
+    is_attacked = candidate.is_attacked_by(candidate.turn, destination)
+    is_defended = candidate.is_attacked_by(mover, destination)
+    if is_attacked and moving_piece is not None:
+        moved_value = _piece_value(move.promotion or moving_piece.piece_type)
+        score -= moved_value * (0.15 if is_defended else 0.45)
+
+    file_index = chess.square_file(destination)
+    rank_index = chess.square_rank(destination)
+    if file_index in (3, 4) and rank_index in (3, 4):
+        score += 15.0
+
+    return score
+
+
+def _fast_policy_move(board: chess.Board, logits, topk: int) -> tuple[str, str, list[dict]]:
+    scored: list[dict] = []
+
+    for item in _legal_moves_with_probs(board, logits, topk):
+        move = chess.Move.from_uci(item['uci'])
+        if move not in board.legal_moves:
+            continue
+        scored.append({
+            **item,
+            'score': _score_fast_candidate(board, move, item['prob']),
+        })
+
+    if not scored:
+        legal_move = next(iter(board.legal_moves), None)
+        if legal_move is None:
+            raise HTTPException(400, 'Game over')
+        return legal_move.uci(), board.san(legal_move), []
+
+    scored.sort(key=lambda item: item['score'], reverse=True)
+    best = chess.Move.from_uci(scored[0]['uci'])
+    return best.uci(), board.san(best), scored
+
+
 def _best_move_with_mcts(model, board, device, simulations):
+    start = time.perf_counter()
     logger.info(f"🧠 MCTS START | sims={simulations}")
 
     mcts = MCTS(model=model, cfg=getattr(model, 'cfg', None), device=device)
@@ -197,6 +275,7 @@ def _best_move_with_mcts(model, board, device, simulations):
         raise HTTPException(500, 'MCTS did not return a legal move')
 
     logger.info(f"✅ MCTS BEST MOVE: {move.uci()}")
+    logger.info(f"MCTS DONE | move={move.uci()} | search_ms={_elapsed_ms(start)}")
     return move.uci(), board.san(move)
 
 
@@ -260,27 +339,95 @@ def health():
 
 @app.post('/predict')
 def predict(req: PredictRequest):
+    total_start = time.perf_counter()
     logger.info("📥 /predict")
 
     model = _get_model()
+    validate_start = time.perf_counter()
     board = _validate_fen(req.fen)
+    validate_ms = _elapsed_ms(validate_start)
 
+    predict_start = time.perf_counter()
     with torch.no_grad():
         logits, value = model.predict(board, device=_get_device())
+    predict_ms = _elapsed_ms(predict_start)
+
+    rank_start = time.perf_counter()
+    moves = _legal_moves_with_probs(board, logits, req.topk)
+    rank_ms = _elapsed_ms(rank_start)
+    total_ms = _elapsed_ms(total_start)
+    logger.info(
+        f"/predict TIMING | validate_ms={validate_ms} | predict_ms={predict_ms} | "
+        f"rank_ms={rank_ms} | total_ms={total_ms} | topk={req.topk}"
+    )
 
     logger.info("📤 prediction done")
 
     return {
         'value': float(value),
-        'moves': _legal_moves_with_probs(board, logits, req.topk)
+        'moves': moves,
+        'timing_ms': {
+            'validate': validate_ms,
+            'predict': predict_ms,
+            'rank': rank_ms,
+            'total': total_ms,
+        },
+    }
+
+
+@app.post('/fastmove')
+def fastmove(req: FastMoveRequest):
+    total_start = time.perf_counter()
+    logger.info(f"/fastmove START | topk={req.topk}")
+
+    model = _get_model()
+    validate_start = time.perf_counter()
+    board = _validate_fen(req.fen)
+    validate_ms = _elapsed_ms(validate_start)
+
+    if board.is_game_over():
+        logger.warning("/fastmove game over")
+        raise HTTPException(400, 'Game over')
+
+    predict_start = time.perf_counter()
+    with torch.no_grad():
+        logits, value = model.predict(board, device=_get_device())
+    predict_ms = _elapsed_ms(predict_start)
+
+    rank_start = time.perf_counter()
+    move, san, candidates = _fast_policy_move(board, logits, int(req.topk or 8))
+    rank_ms = _elapsed_ms(rank_start)
+    total_ms = _elapsed_ms(total_start)
+
+    logger.info(
+        f"/fastmove TIMING | move={move} | validate_ms={validate_ms} | "
+        f"predict_ms={predict_ms} | rank_ms={rank_ms} | total_ms={total_ms} | "
+        f"candidates={len(candidates)}"
+    )
+
+    return {
+        'move': move,
+        'san': san,
+        'source': 'fast_policy',
+        'value': float(value),
+        'candidates': candidates[:5],
+        'timing_ms': {
+            'validate': validate_ms,
+            'predict': predict_ms,
+            'rank': rank_ms,
+            'total': total_ms,
+        },
     }
 
 
 @app.post('/bestmove')
 def bestmove(req: BestMoveRequest):
+    total_start = time.perf_counter()
     logger.info("♟️ /bestmove")
 
+    validate_start = time.perf_counter()
     board = _validate_fen(req.fen)
+    validate_ms = _elapsed_ms(validate_start)
 
     if board.is_game_over():
         logger.warning("⚠️ game over")
@@ -289,8 +436,21 @@ def bestmove(req: BestMoveRequest):
     sims = req.simulations or int(get_current_config().system.default_bestmove_simulations)
 
     move, san = _best_move_with_mcts(_get_model(), board, _get_device(), sims)
+    total_ms = _elapsed_ms(total_start)
+    logger.info(
+        f"/bestmove TIMING | move={move} | validate_ms={validate_ms} | "
+        f"total_ms={total_ms} | sims={sims}"
+    )
 
-    return {'move': move, 'san': san, 'simulations': sims}
+    return {
+        'move': move,
+        'san': san,
+        'simulations': sims,
+        'timing_ms': {
+            'validate': validate_ms,
+            'total': total_ms,
+        },
+    }
 
 
 # ================= WEBSOCKET =================
