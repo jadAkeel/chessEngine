@@ -112,7 +112,7 @@ class PrinciplePenaltiesConfig:
 
 @dataclass(frozen=True)
 class MCTSConfig:
-    num_simulations: int = 256
+    num_simulations: int = 64
     c_puct: float = 1.8
     dirichlet_alpha: float = 0.25
     dirichlet_eps: float = 0.25
@@ -176,7 +176,7 @@ class SystemConfig:
     log_level: str = "INFO"
     json_logs: bool = False
     checkpoint_path: str = "models/best_model.pth"
-    default_bestmove_simulations: int = 100
+    default_bestmove_simulations: int = 32
     max_halfmove: int = 100
     max_fullmove: int = 200
     cpu_threads: int = 0

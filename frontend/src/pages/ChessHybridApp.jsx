@@ -126,7 +126,7 @@ export default function ChessHybridApp() {
   const [fen, setFen] = useState(gameRef.current.fen());
   const [moveHistory, setMoveHistory] = useState([]);
   const [playerColor, setPlayerColor] = useState("w");
-  const [depth, setDepth] = useState("6");
+  const [depth, setDepth] = useState("3");
   const [engineThinking, setEngineThinking] = useState(false);
   const [lastMoveSquares, setLastMoveSquares] = useState({});
   const [moveFrom, setMoveFrom] = useState("");
@@ -200,8 +200,7 @@ export default function ChessHybridApp() {
 
     setEngineThinking(true);
     try {
-      const requestedSimulations = Math.max(16, Math.min(100, Number(depth) * 16));
-      // const requestedSimulations = Math.max(24, Math.min(140, Number(depth) * 30));
+      const requestedSimulations = Math.max(4, Math.min(36, Number(depth) * 6));
       const res = await fetch(`${API_BASE_URL}/bestmove`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
