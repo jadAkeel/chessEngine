@@ -95,9 +95,9 @@ class PredictRequest(FenRequest):
 
 
 class FastMoveRequest(FenRequest):
-    topk: int | None = Field(default=18, ge=1, le=48)
+    topk: int | None = Field(default=16, ge=1, le=36)
     depth: int | None = Field(default=6, ge=1, le=10)
-    max_simulations: int | None = Field(default=None, ge=0, le=240)
+    max_simulations: int | None = Field(default=None, ge=0, le=180)
     adaptive: bool = True
 
 
@@ -332,33 +332,33 @@ def _adaptive_simulations(depth: int | None, complexity: int, max_simulations: i
     depth = max(1, min(10, int(depth or 6)))
 
     if complexity >= 8:
-        base = 120
-    elif complexity >= 6:
-        base = 96
-    elif complexity >= 4:
         base = 72
+    elif complexity >= 6:
+        base = 56
+    elif complexity >= 4:
+        base = 40
     elif complexity >= 3:
-        base = 48
-    elif complexity >= 2 and depth >= 6:
-        base = 32
+        base = 28
+    elif complexity >= 2 and depth >= 7:
+        base = 18
     else:
         return 0
 
     depth_factor = {
-        1: 0.35,
-        2: 0.50,
-        3: 0.65,
-        4: 0.85,
-        5: 1.00,
-        6: 1.25,
-        7: 1.45,
-        8: 1.65,
-        9: 1.85,
-        10: 2.00,
+        1: 0.25,
+        2: 0.35,
+        3: 0.50,
+        4: 0.65,
+        5: 0.80,
+        6: 1.00,
+        7: 1.15,
+        8: 1.30,
+        9: 1.45,
+        10: 1.60,
     }[depth]
     simulations = int(round(base * depth_factor))
 
-    cap = 240 if max_simulations is None else max(0, min(240, int(max_simulations)))
+    cap = 120 if max_simulations is None else max(0, min(180, int(max_simulations)))
     return min(cap, max(1, simulations))
 
 

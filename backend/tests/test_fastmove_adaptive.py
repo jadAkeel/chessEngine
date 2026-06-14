@@ -25,14 +25,15 @@ def test_find_mate_in_one_from_reported_game():
 
 
 def test_adaptive_simulations_keep_obvious_positions_fast():
-    assert _adaptive_simulations(depth=6, complexity=0, max_simulations=180) == 0
-    assert _adaptive_simulations(depth=6, complexity=1, max_simulations=180) == 0
+    assert _adaptive_simulations(depth=6, complexity=0, max_simulations=96) == 0
+    assert _adaptive_simulations(depth=6, complexity=1, max_simulations=96) == 0
+    assert _adaptive_simulations(depth=6, complexity=2, max_simulations=96) == 0
 
 
 def test_adaptive_simulations_raise_budget_for_complex_positions():
-    assert _adaptive_simulations(depth=6, complexity=3, max_simulations=180) == 60
-    assert _adaptive_simulations(depth=6, complexity=8, max_simulations=180) == 150
-    assert _adaptive_simulations(depth=10, complexity=8, max_simulations=180) == 180
+    assert _adaptive_simulations(depth=6, complexity=3, max_simulations=96) == 28
+    assert _adaptive_simulations(depth=6, complexity=8, max_simulations=96) == 72
+    assert _adaptive_simulations(depth=10, complexity=8, max_simulations=96) == 96
 
 
 def test_complexity_marks_check_as_forcing_position():

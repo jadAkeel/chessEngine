@@ -201,7 +201,7 @@ export default function ChessHybridApp() {
     setEngineThinking(true);
     try {
       const engineDepth = Number(depth);
-      const candidateCount = Math.max(12, Math.min(24, engineDepth * 4));
+      const candidateCount = Math.max(10, Math.min(16, engineDepth * 3));
       const res = await fetch(`${API_BASE_URL}/fastmove`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -209,7 +209,7 @@ export default function ChessHybridApp() {
           fen: game.fen(),
           topk: candidateCount,
           depth: engineDepth,
-          max_simulations: 180,
+          max_simulations: 96,
           adaptive: true
         })
       });
