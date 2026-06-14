@@ -245,6 +245,44 @@ def _score_fast_candidate(board: chess.Board, move: chess.Move, policy_prob: flo
     return score
 
 
+def _fast_score_diagnostics(board: chess.Board, candidates: list[dict], limit: int = 5) -> list[dict]:
+    diagnostics: list[dict] = []
+    for item in candidates[: max(1, int(limit))]:
+        move_uci = item.get('uci')
+        if not move_uci:
+            continue
+        move = chess.Move.from_uci(move_uci)
+        if move not in board.legal_moves:
+            continue
+
+        moving_piece = board.piece_at(move.from_square)
+        captured_value = _captured_value_for_move(board, move)
+        promotion_value = _piece_value(move.promotion) if move.promotion else 0
+        candidate = _board_after_move(board, move)
+        destination_attacked = candidate.is_attacked_by(candidate.turn, move.to_square)
+        destination_defended = candidate.is_attacked_by(not candidate.turn, move.to_square)
+        moved_value = _piece_value(move.promotion or (moving_piece.piece_type if moving_piece else None))
+        destination_risk_penalty = 0.0
+        if destination_attacked and moving_piece is not None:
+            destination_risk_penalty = moved_value * (0.15 if destination_defended else 0.45)
+
+        diagnostics.append({
+            'uci': move.uci(),
+            'san': board.san(move),
+            'policy_prob': round(float(item.get('prob', 0.0)), 6),
+            'fast_score': round(float(item.get('score', 0.0)), 3),
+            'captured_value': captured_value,
+            'promotion_value': promotion_value,
+            'gives_check': candidate.is_check(),
+            'allows_mate_one': _find_mate_in_one(candidate) is not None,
+            'allows_promotion_threat': _side_can_create_promotion_threat(candidate),
+            'destination_attacked': destination_attacked,
+            'destination_defended': destination_defended,
+            'destination_risk_penalty': round(float(destination_risk_penalty), 3),
+        })
+    return diagnostics
+
+
 def _captured_value_for_move(board: chess.Board, move: chess.Move) -> int:
     if board.is_en_passant(move):
         return _piece_value(chess.PAWN)
@@ -644,10 +682,16 @@ def _should_use_adaptive_search(complexity: int, reasons: list[str], depth: int 
     return False
 
 
-def _fast_policy_move(board: chess.Board, logits, topk: int) -> tuple[str, str, list[dict]]:
+def _fast_policy_move(
+    board: chess.Board,
+    logits,
+    topk: int,
+    legal_policy_moves: list[dict] | None = None,
+) -> tuple[str, str, list[dict]]:
     scored: list[dict] = []
 
-    for item in _legal_moves_with_probs(board, logits, topk):
+    policy_moves = legal_policy_moves if legal_policy_moves is not None else _legal_moves_with_probs(board, logits, topk)
+    for item in policy_moves:
         move = chess.Move.from_uci(item['uci'])
         if move not in board.legal_moves:
             continue
@@ -667,7 +711,7 @@ def _fast_policy_move(board: chess.Board, logits, topk: int) -> tuple[str, str, 
     return best.uci(), board.san(best), scored
 
 
-def _best_move_with_mcts(model, board, device, simulations):
+def _best_move_with_mcts(model, board, device, simulations, include_diagnostics: bool = False):
     start = time.perf_counter()
     logger.info(f"🧠 MCTS START | sims={simulations}")
 
@@ -682,6 +726,8 @@ def _best_move_with_mcts(model, board, device, simulations):
 
     logger.info(f"✅ MCTS BEST MOVE: {move.uci()}")
     logger.info(f"MCTS DONE | move={move.uci()} | search_ms={_elapsed_ms(start)}")
+    if include_diagnostics:
+        return move.uci(), board.san(move), result.get('root_diagnostics', [])
     return move.uci(), board.san(move)
 
 
@@ -833,9 +879,11 @@ def fastmove(req: FastMoveRequest):
     predict_ms = _elapsed_ms(predict_start)
 
     rank_start = time.perf_counter()
-    move, san, candidates = _fast_policy_move(board, logits, int(req.topk or 8))
+    raw_policy_top = _legal_moves_with_probs(board, logits, int(req.topk or 8))
+    move, san, candidates = _fast_policy_move(board, logits, int(req.topk or 8), raw_policy_top)
     rank_ms = _elapsed_ms(rank_start)
     fast_move, fast_san = move, san
+    fast_score_debug = _fast_score_diagnostics(board, candidates)
     complexity, adaptive_reasons = _fastmove_complexity(board, candidates)
     decisive_fast_choice = _is_decisive_fast_choice(board, candidates, adaptive_reasons)
     use_adaptive_search = bool(
@@ -855,11 +903,18 @@ def fastmove(req: FastMoveRequest):
     search_ms = 0.0
     source = 'fast_policy'
     rejected_safety_reasons: list[str] = []
+    mcts_root_debug: list[dict] = []
 
     if simulations > 0:
         search_start = time.perf_counter()
         try:
-            mcts_move, mcts_san = _best_move_with_mcts(model, board, _get_device(), simulations)
+            mcts_move, mcts_san, mcts_root_debug = _best_move_with_mcts(
+                model,
+                board,
+                _get_device(),
+                simulations,
+                include_diagnostics=True,
+            )
             mcts_safety = _move_safety_flags(board, mcts_move)
             safe_fallback = _safe_candidate_fallback(board, candidates) if _has_safety_risk(mcts_safety) else None
             if safe_fallback is not None and safe_fallback[0] != mcts_move:
@@ -891,6 +946,16 @@ def fastmove(req: FastMoveRequest):
 
     total_ms = _elapsed_ms(total_start)
 
+    decision_debug = {
+        'raw_policy_top': raw_policy_top[:5],
+        'fast_scores': fast_score_debug,
+        'mcts_root': mcts_root_debug[:5],
+    }
+    logger.info(
+        f"/fastmove DECISION_DEBUG | raw_policy_top={decision_debug['raw_policy_top']} | "
+        f"fast_scores={decision_debug['fast_scores']} | mcts_root={decision_debug['mcts_root']}"
+    )
+
     logger.info(
         f"/fastmove TIMING | move={move} | source={source} | validate_ms={validate_ms} | "
         f"predict_ms={predict_ms} | rank_ms={rank_ms} | search_ms={search_ms} | "
@@ -918,6 +983,7 @@ def fastmove(req: FastMoveRequest):
             'final_safety': final_safety,
             'rejected_safety': rejected_safety_reasons,
         },
+        'diagnostics': decision_debug,
         'timing_ms': {
             'validate': validate_ms,
             'predict': predict_ms,

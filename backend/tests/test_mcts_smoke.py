@@ -23,6 +23,13 @@ class MCTSSmokeTests(unittest.TestCase):
         result = MCTS(model=model, cfg=cfg, device='cpu').search(board, num_simulations=2)
         self.assertIn(result['best_move'], board.legal_moves)
         self.assertGreater(len(result['visit_counts']), 0)
+        self.assertGreater(len(result['root_diagnostics']), 0)
+        first_diag = result['root_diagnostics'][0]
+        self.assertIn('uci', first_diag)
+        self.assertIn('prior', first_diag)
+        self.assertIn('visits', first_diag)
+        self.assertIn('penalty', first_diag)
+        self.assertIn('final_score', first_diag)
 
 
 if __name__ == '__main__':

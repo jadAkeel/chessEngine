@@ -217,6 +217,13 @@ class MCTS:
         raw_policy_target = self._visit_policy(root, temperature=temperature)
         adjusted_policy_target, root_repetition_counts = self._adjust_root_policy(board, raw_policy_target, root_seen_positions)
         best_move = self._select_root_move(board, root, adjusted_policy_target or raw_policy_target, root_seen_positions)
+        root_diagnostics = self._root_move_diagnostics(
+            board,
+            root,
+            raw_policy_target,
+            adjusted_policy_target,
+            root_seen_positions,
+        )
         root_value = float(root.q) if root.visit_count > 0 else float(initial_root_value)
 
         self.logger.debug(
@@ -233,6 +240,7 @@ class MCTS:
             "policy_target": raw_policy_target,
             "adjusted_policy_target": adjusted_policy_target,
             "root_repetition_counts": root_repetition_counts,
+            "root_diagnostics": root_diagnostics,
             "root_value": root_value,
         }
         if diagnostics is not None:
@@ -639,6 +647,55 @@ class MCTS:
             second_penalty = self._move_penalty(board, second_move, seen_positions)
             return second_move if second_penalty + 1e-9 < top_penalty else top_move
         return top_move
+
+    def _root_move_diagnostics(
+        self,
+        board: chess.Board,
+        root: Node,
+        raw_policy_target: dict[chess.Move, float],
+        adjusted_policy_target: dict[chess.Move, float],
+        seen_positions: Mapping[PositionKey, int] | None = None,
+        limit: int = 8,
+    ) -> list[dict]:
+        parent_visits = max(1, root.total_visit_count)
+        diagnostics: list[dict] = []
+
+        for move, child in root.children.items():
+            components = self._move_penalty_components(board, move, seen_positions)
+            penalty = float(sum(components.values()))
+            q_value = float(-child.q)
+            u_value = float(self.c_puct * child.prior * math.sqrt(parent_visits) / (1 + child.total_visit_count))
+            raw_score = float(q_value + u_value)
+            nonzero_components = {
+                name: round(float(value), 6)
+                for name, value in components.items()
+                if float(value) > 0.0
+            }
+            diagnostics.append(
+                {
+                    "uci": move.uci(),
+                    "san": board.san(move),
+                    "prior": round(float(child.prior), 6),
+                    "visits": int(child.visit_count),
+                    "q": round(float(child.q), 6),
+                    "policy": round(float(raw_policy_target.get(move, 0.0)), 6),
+                    "adjusted_policy": round(float(adjusted_policy_target.get(move, 0.0)), 6),
+                    "raw_score": round(raw_score, 6),
+                    "penalty": round(penalty, 6),
+                    "final_score": round(raw_score - penalty, 6),
+                    "penalty_components": nonzero_components,
+                }
+            )
+
+        diagnostics.sort(
+            key=lambda item: (
+                float(item["adjusted_policy"]),
+                int(item["visits"]),
+                float(item["prior"]),
+            ),
+            reverse=True,
+        )
+        return diagnostics[: max(1, int(limit))]
 
     def _backpropagate(self, search_path: list[Node], value: float) -> None:
         current_value = float(value)
