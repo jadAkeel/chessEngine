@@ -4,6 +4,9 @@ from app.api.main import (
     _adaptive_simulations,
     _fastmove_complexity,
     _find_mate_in_one,
+    _is_decisive_fast_choice,
+    _is_light_adaptive_search,
+    _move_allows_forced_mate_in_two,
     _move_allows_mate_in_one,
     _should_use_adaptive_search,
 )
@@ -37,6 +40,26 @@ def test_adaptive_simulations_raise_budget_for_complex_positions():
     assert _adaptive_simulations(depth=10, complexity=8, max_simulations=96) == 96
 
 
+def test_light_adaptive_search_uses_small_budget_for_close_forcing_choices():
+    reasons = ["forcing_moves_available", "top_moves_very_close"]
+
+    assert _should_use_adaptive_search(4, reasons, depth=6) is True
+    assert _is_light_adaptive_search(4, reasons, depth=6) is True
+    assert _adaptive_simulations(depth=6, complexity=4, max_simulations=96, light=True) == 8
+
+
+def test_light_adaptive_search_keeps_full_budget_for_tactical_danger():
+    reasons = ["many_forcing_moves", "top_moves_very_close"]
+
+    assert _is_light_adaptive_search(5, reasons, depth=6) is False
+    assert _is_light_adaptive_search(
+        4,
+        ["forcing_moves_available", "top_moves_very_close", "best_fast_move_allows_mate_two"],
+        depth=6,
+    ) is False
+    assert _adaptive_simulations(depth=6, complexity=5, max_simulations=96, light=False) == 40
+
+
 def test_adaptive_search_skips_quiet_close_policy_scores():
     assert _should_use_adaptive_search(3, ["top_moves_very_close"], depth=6) is False
     assert _should_use_adaptive_search(4, ["top_moves_close", "forcing_moves_available"], depth=6) is False
@@ -54,6 +77,46 @@ def test_adaptive_search_runs_for_tactical_urgency():
         depth=6,
     ) is True
     assert _should_use_adaptive_search(4, ["forcing_moves_available", "top_moves_very_close"], depth=6) is True
+
+
+def test_decisive_fast_choice_skips_obvious_material_win():
+    board = chess.Board("4k3/8/8/8/8/4q3/8/4RK2 w - - 0 1")
+    candidates = [
+        {"uci": "e1e3", "score": 900.0},
+        {"uci": "f1g1", "score": 860.0},
+    ]
+
+    assert _is_decisive_fast_choice(board, candidates, ["many_forcing_moves", "top_moves_close"]) is True
+
+
+def test_decisive_fast_choice_does_not_skip_small_unclear_capture():
+    board = chess.Board("4k3/8/8/8/8/8/4p3/4RK2 w - - 0 1")
+    candidates = [
+        {"uci": "e1e2", "score": 250.0},
+        {"uci": "f1g1", "score": 230.0},
+    ]
+
+    assert _is_decisive_fast_choice(board, candidates, ["many_forcing_moves", "top_moves_close"]) is False
+
+
+def test_move_allows_forced_mate_in_two_from_reported_loss():
+    board = chess.Board("8/5pk1/3p1n2/3Br3/5Qp1/6K1/8/7R b - - 5 36")
+
+    assert _move_allows_forced_mate_in_two(board, "e5d5") is True
+    assert _move_allows_forced_mate_in_two(board, "g7g8") is False
+
+
+def test_complexity_marks_best_fast_move_allows_mate_two():
+    board = chess.Board("8/5pk1/3p1n2/3Br3/5Qp1/6K1/8/7R b - - 5 36")
+    candidates = [
+        {"uci": "e5d5", "score": 900.0},
+        {"uci": "g7g8", "score": 850.0},
+    ]
+
+    complexity, reasons = _fastmove_complexity(board, candidates)
+
+    assert complexity >= 4
+    assert "best_fast_move_allows_mate_two" in reasons
 
 
 def test_complexity_marks_check_as_forcing_position():
