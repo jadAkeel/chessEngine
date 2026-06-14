@@ -200,14 +200,15 @@ export default function ChessHybridApp() {
 
     setEngineThinking(true);
     try {
-      const res = await fetch(`${API_BASE_URL}/predict`, {
+      const candidateCount = Math.max(6, Math.min(14, Number(depth) * 2));
+      const res = await fetch(`${API_BASE_URL}/fastmove`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fen: game.fen(), topk: 1 })
+        body: JSON.stringify({ fen: game.fen(), topk: candidateCount })
       });
       const data = await res.json();
 
-      const uci = data.moves?.[0]?.uci || data.move || data.best_move;
+      const uci = data.move || data.moves?.[0]?.uci || data.best_move;
       if (uci) {
         const from = uci.slice(0, 2);
         const to = uci.slice(2, 4);
