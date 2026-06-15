@@ -2,12 +2,17 @@ import chess
 
 from app.api.main import (
     _adaptive_simulations,
+    _adaptive_simulation_steps,
     _fastmove_complexity,
     _find_mate_in_one,
     _is_decisive_fast_choice,
     _is_light_adaptive_search,
+    _mcts_confident_enough,
     _move_allows_forced_mate_in_two,
     _move_allows_mate_in_one,
+    _move_allows_queen_capture,
+    _move_allows_valuable_piece_capture,
+    _score_fast_candidate,
     _should_use_adaptive_search,
 )
 
@@ -28,16 +33,19 @@ def test_find_mate_in_one_from_reported_game():
     assert board.san(move) == "Rc8#"
 
 
-def test_adaptive_simulations_keep_obvious_positions_fast():
-    assert _adaptive_simulations(depth=6, complexity=0, max_simulations=96) == 0
-    assert _adaptive_simulations(depth=6, complexity=1, max_simulations=96) == 0
-    assert _adaptive_simulations(depth=6, complexity=2, max_simulations=96) == 0
+def test_adaptive_simulations_start_from_minimum_probe_for_quiet_positions():
+    assert _adaptive_simulations(depth=6, complexity=0, max_simulations=96) == 8
+    assert _adaptive_simulations(depth=6, complexity=1, max_simulations=96) == 8
+    assert _adaptive_simulations(depth=6, complexity=2, max_simulations=96) == 8
+    assert _adaptive_simulation_steps(depth=6, complexity=0, max_simulations=96) == [8]
 
 
 def test_adaptive_simulations_raise_budget_for_complex_positions():
     assert _adaptive_simulations(depth=6, complexity=3, max_simulations=96) == 28
     assert _adaptive_simulations(depth=6, complexity=8, max_simulations=96) == 72
     assert _adaptive_simulations(depth=10, complexity=8, max_simulations=96) == 96
+    assert _adaptive_simulation_steps(depth=6, complexity=3, max_simulations=96) == [8, 16, 28]
+    assert _adaptive_simulation_steps(depth=6, complexity=8, max_simulations=96) == [8, 16, 32, 72]
 
 
 def test_light_adaptive_search_uses_small_budget_for_close_forcing_choices():
@@ -45,7 +53,14 @@ def test_light_adaptive_search_uses_small_budget_for_close_forcing_choices():
 
     assert _should_use_adaptive_search(4, reasons, depth=6) is True
     assert _is_light_adaptive_search(4, reasons, depth=6) is True
-    assert _adaptive_simulations(depth=6, complexity=4, max_simulations=96, light=True) == 8
+    assert _adaptive_simulations(depth=6, complexity=4, max_simulations=96, light=True) == 16
+    assert _adaptive_simulation_steps(depth=6, complexity=4, max_simulations=96, light=True) == [8, 16]
+
+
+def test_light_adaptive_search_runs_for_maybe_tactical_positions():
+    assert _should_use_adaptive_search(1, ["top_moves_competitive"], depth=6) is False
+    assert _is_light_adaptive_search(1, ["top_moves_competitive"], depth=6) is True
+    assert _is_light_adaptive_search(2, ["best_fast_move_allows_minor_capture"], depth=6) is True
 
 
 def test_light_adaptive_search_keeps_full_budget_for_tactical_danger():
@@ -58,6 +73,30 @@ def test_light_adaptive_search_keeps_full_budget_for_tactical_danger():
         depth=6,
     ) is False
     assert _adaptive_simulations(depth=6, complexity=5, max_simulations=96, light=False) == 40
+
+
+def test_full_adaptive_search_does_not_confidence_stop_at_first_probe():
+    root_debug = [
+        {"uci": "e2e4", "visits": 6},
+        {"uci": "d2d4", "visits": 1},
+    ]
+
+    assert _mcts_confident_enough(
+        fast_move="e2e4",
+        mcts_move="e2e4",
+        root_debug=root_debug,
+        safety_flags={},
+        light=False,
+        current_simulations=8,
+    ) is False
+    assert _mcts_confident_enough(
+        fast_move="e2e4",
+        mcts_move="e2e4",
+        root_debug=root_debug,
+        safety_flags={},
+        light=True,
+        current_simulations=8,
+    ) is True
 
 
 def test_adaptive_search_skips_quiet_close_policy_scores():
@@ -135,3 +174,28 @@ def test_move_allows_mate_in_one_detects_blunder():
 
     assert _move_allows_mate_in_one(board, "g2g4") is True
     assert _move_allows_mate_in_one(board, "g2g3") is False
+
+
+def test_queen_move_in_front_of_pawn_is_marked_unsafe():
+    board = chess.Board("3qk3/8/8/8/2P5/8/8/4K3 b - - 0 1")
+
+    assert _move_allows_queen_capture(board, "d8d5") is True
+    assert _move_allows_queen_capture(board, "d8e7") is False
+    assert _move_allows_valuable_piece_capture(board, "d8d5") is True
+
+
+def test_fast_score_penalizes_hanging_queen():
+    board = chess.Board("3qk3/8/8/8/2P5/8/8/4K3 b - - 0 1")
+    hanging_queen = chess.Move.from_uci("d8d5")
+    safe_queen = chess.Move.from_uci("d8e7")
+
+    assert _score_fast_candidate(board, hanging_queen, 0.90) < _score_fast_candidate(board, safe_queen, 0.10)
+
+
+def test_rook_and_minor_piece_hanging_moves_are_marked_unsafe():
+    rook_board = chess.Board("3rk3/8/8/8/2P5/8/8/4K3 b - - 0 1")
+    minor_board = chess.Board("4k3/8/5n2/8/2P5/8/8/4K3 b - - 0 1")
+
+    assert _move_allows_valuable_piece_capture(rook_board, "d8d5") is True
+    assert _move_allows_valuable_piece_capture(rook_board, "d8d7") is False
+    assert _move_allows_valuable_piece_capture(minor_board, "f6d5") is True

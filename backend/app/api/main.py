@@ -226,6 +226,13 @@ def _score_fast_candidate(board: chess.Board, move: chess.Move, policy_prob: flo
         score -= 50000.0
     if _side_can_create_promotion_threat(candidate):
         score -= 1200.0
+    if _side_can_capture_queen(candidate):
+        score -= 3000.0
+    hanging_value = _max_valuable_capture_value(candidate, min_value=_piece_value(chess.KNIGHT))
+    if hanging_value >= _piece_value(chess.ROOK):
+        score -= hanging_value * 2.0
+    elif hanging_value >= _piece_value(chess.KNIGHT):
+        score -= hanging_value * 1.25
     if candidate.is_check():
         score += 60.0
 
@@ -276,6 +283,11 @@ def _fast_score_diagnostics(board: chess.Board, candidates: list[dict], limit: i
             'gives_check': candidate.is_check(),
             'allows_mate_one': _find_mate_in_one(candidate) is not None,
             'allows_promotion_threat': _side_can_create_promotion_threat(candidate),
+            'allows_queen_capture': _side_can_capture_queen(candidate),
+            'allows_valuable_capture_value': _max_valuable_capture_value(
+                candidate,
+                min_value=_piece_value(chess.KNIGHT),
+            ),
             'destination_attacked': destination_attacked,
             'destination_defended': destination_defended,
             'destination_risk_penalty': round(float(destination_risk_penalty), 3),
@@ -301,6 +313,9 @@ def _is_decisive_fast_choice(board: chess.Board, candidates: list[dict], reasons
         'best_fast_move_allows_mate',
         'best_fast_move_allows_mate_two',
         'best_fast_move_allows_promotion_threat',
+        'best_fast_move_allows_queen_capture',
+        'best_fast_move_allows_rook_capture',
+        'best_fast_move_allows_minor_capture',
     }.intersection(reason_set):
         return False
     if len(candidates) < 2:
@@ -437,6 +452,57 @@ def _move_allows_promotion_threat(board: chess.Board, move_uci: str) -> bool:
     return _side_can_create_promotion_threat(candidate)
 
 
+def _captured_piece_for_move(board: chess.Board, move: chess.Move) -> chess.Piece | None:
+    if board.is_en_passant(move):
+        offset = -8 if board.turn == chess.WHITE else 8
+        return board.piece_at(move.to_square + offset)
+    return board.piece_at(move.to_square)
+
+
+def _max_valuable_capture_value(board: chess.Board, min_value: int = 0) -> int:
+    defender = not board.turn
+    max_value = 0
+
+    for move in board.legal_moves:
+        if not board.is_capture(move):
+            continue
+
+        captured_piece = _captured_piece_for_move(board, move)
+        if captured_piece is None or captured_piece.color != defender or captured_piece.piece_type == chess.KING:
+            continue
+
+        captured_value = _piece_value(captured_piece.piece_type)
+        if captured_value < min_value:
+            continue
+
+        attacker_piece = board.piece_at(move.from_square)
+        attacker_value = _piece_value(attacker_piece.piece_type if attacker_piece else None)
+        target_defended = board.is_attacked_by(defender, move.to_square)
+        bad_exchange = not target_defended or captured_value >= attacker_value + 200
+        if bad_exchange:
+            max_value = max(max_value, captured_value)
+
+    return max_value
+
+
+def _move_allows_valuable_piece_capture(board: chess.Board, move_uci: str, min_value: int | None = None) -> bool:
+    move = chess.Move.from_uci(move_uci)
+    if move not in board.legal_moves:
+        return True
+
+    candidate = _board_after_move(board, move)
+    threshold = _piece_value(chess.KNIGHT) if min_value is None else int(min_value)
+    return _max_valuable_capture_value(candidate, min_value=threshold) >= threshold
+
+
+def _side_can_capture_queen(board: chess.Board) -> bool:
+    return _max_valuable_capture_value(board, min_value=_piece_value(chess.QUEEN)) >= _piece_value(chess.QUEEN)
+
+
+def _move_allows_queen_capture(board: chess.Board, move_uci: str) -> bool:
+    return _move_allows_valuable_piece_capture(board, move_uci, min_value=_piece_value(chess.QUEEN))
+
+
 def _king_exposure_score(board: chess.Board, color: chess.Color) -> int:
     king_square = board.king(color)
     if king_square is None:
@@ -472,6 +538,8 @@ def _move_safety_flags(board: chess.Board, move_uci: str) -> dict[str, bool]:
         'mate_one': _move_allows_mate_in_one(board, move_uci),
         'mate_two': _move_allows_forced_mate_in_two(board, move_uci),
         'promotion_threat': _move_allows_promotion_threat(board, move_uci),
+        'queen_capture': _move_allows_queen_capture(board, move_uci),
+        'valuable_piece_capture': _move_allows_valuable_piece_capture(board, move_uci),
     }
 
 
@@ -479,7 +547,12 @@ def _has_safety_risk(flags: dict[str, bool]) -> bool:
     return any(flags.values())
 
 
+def _has_critical_safety_risk(flags: dict[str, bool]) -> bool:
+    return any(value for key, value in flags.items() if key != 'valuable_piece_capture')
+
+
 def _safe_candidate_fallback(board: chess.Board, candidates: list[dict]) -> tuple[str, str, dict[str, bool]] | None:
+    soft_fallback: tuple[str, str, dict[str, bool]] | None = None
     for candidate in candidates:
         move_uci = candidate.get('uci')
         if not move_uci:
@@ -490,7 +563,9 @@ def _safe_candidate_fallback(board: chess.Board, candidates: list[dict]) -> tupl
         flags = _move_safety_flags(board, move_uci)
         if not _has_safety_risk(flags):
             return move_uci, board.san(move), flags
-    return None
+        if soft_fallback is None and not _has_critical_safety_risk(flags):
+            soft_fallback = (move_uci, board.san(move), flags)
+    return soft_fallback
 
 
 def _board_after_move(board: chess.Board, move: chess.Move) -> chess.Board:
@@ -561,6 +636,18 @@ def _fastmove_complexity(board: chess.Board, candidates: list[dict]) -> tuple[in
             complexity += 3
             reasons.append('best_fast_move_allows_promotion_threat')
 
+        if _side_can_capture_queen(candidate):
+            complexity += 4
+            reasons.append('best_fast_move_allows_queen_capture')
+        else:
+            hanging_value = _max_valuable_capture_value(candidate, min_value=_piece_value(chess.KNIGHT))
+            if hanging_value >= _piece_value(chess.ROOK):
+                complexity += 3
+                reasons.append('best_fast_move_allows_rook_capture')
+            elif hanging_value >= _piece_value(chess.KNIGHT):
+                complexity += 2
+                reasons.append('best_fast_move_allows_minor_capture')
+
     high_value_capture = False
     for move in legal_moves:
         captured_piece = board.piece_at(move.to_square)
@@ -576,22 +663,30 @@ def _fastmove_complexity(board: chess.Board, candidates: list[dict]) -> tuple[in
 
 def _is_light_adaptive_search(complexity: int, reasons: list[str], depth: int | None) -> bool:
     reason_set = set(reasons)
-    if int(depth or 6) > 6:
+    if int(depth or 6) > 7:
         return False
     if complexity > 4:
         return False
-    if not {'forcing_moves_available', 'top_moves_very_close'}.issubset(reason_set):
-        return False
-    return not reason_set.intersection({
+    if reason_set.intersection({
         'king_in_check',
         'king_exposed',
         'best_fast_move_allows_mate',
         'best_fast_move_allows_mate_two',
         'best_fast_move_allows_promotion_threat',
+        'best_fast_move_allows_queen_capture',
+        'best_fast_move_allows_rook_capture',
         'few_legal_moves',
+    }):
+        return False
+    return bool(reason_set.intersection({
+        'forcing_moves_available',
         'many_forcing_moves',
+        'top_moves_competitive',
+        'top_moves_close',
+        'top_moves_very_close',
         'high_value_capture',
-    })
+        'best_fast_move_allows_minor_capture',
+    }))
 
 
 def _adaptive_simulations(
@@ -603,7 +698,7 @@ def _adaptive_simulations(
     depth = max(1, min(10, int(depth or 6)))
 
     if light:
-        base = 8
+        base = 16 if complexity >= 3 else 8
     elif complexity >= 8:
         base = 72
     elif complexity >= 6:
@@ -615,7 +710,7 @@ def _adaptive_simulations(
     elif complexity >= 2 and depth >= 7:
         base = 18
     else:
-        return 0
+        base = 8
 
     depth_factor = {
         1: 0.25,
@@ -631,10 +726,74 @@ def _adaptive_simulations(
     }[depth]
     simulations = int(round(base * depth_factor))
 
-    cap = 120 if max_simulations is None else max(0, min(180, int(max_simulations)))
+    cap = 120 if max_simulations is None else max(8, min(180, int(max_simulations)))
     if light:
         cap = min(cap, 16)
-    return min(cap, max(1, simulations))
+    return min(cap, max(8, simulations))
+
+
+def _adaptive_simulation_steps(
+    depth: int | None,
+    complexity: int,
+    max_simulations: int | None = None,
+    light: bool = False,
+) -> list[int]:
+    target = _adaptive_simulations(depth, complexity, max_simulations, light=light)
+    if target <= 0:
+        return []
+    if light:
+        return [8, target] if target > 8 else [8]
+    if target <= 16:
+        return [8, target] if target > 8 else [8]
+    if target <= 40:
+        steps = [8, 16, target]
+    else:
+        steps = [8, 16, min(32, target), target]
+
+    unique_steps: list[int] = []
+    for step in steps:
+        step = int(step)
+        if step > 0 and step not in unique_steps:
+            unique_steps.append(step)
+    return unique_steps
+
+
+def _mcts_confident_enough(
+    *,
+    fast_move: str,
+    mcts_move: str,
+    root_debug: list[dict],
+    safety_flags: dict[str, bool],
+    light: bool,
+    current_simulations: int,
+) -> bool:
+    if _has_safety_risk(safety_flags):
+        return False
+    if light and mcts_move == fast_move:
+        return True
+    if not light and current_simulations < 16:
+        return False
+    if not root_debug:
+        return mcts_move == fast_move and current_simulations >= 16
+
+    by_visits = sorted(root_debug, key=lambda item: int(item.get('visits', 0)), reverse=True)
+    top = by_visits[0]
+    if top.get('uci') != mcts_move:
+        return False
+
+    top_visits = int(top.get('visits', 0))
+    second_visits = int(by_visits[1].get('visits', 0)) if len(by_visits) > 1 else 0
+    total_visits = max(1, sum(int(item.get('visits', 0)) for item in by_visits))
+    visit_share = top_visits / total_visits
+    visit_gap = top_visits - second_visits
+
+    if mcts_move == fast_move and visit_gap >= 2:
+        return True
+    if current_simulations >= 16 and visit_share >= 0.55 and visit_gap >= 3:
+        return True
+    if current_simulations >= 28 and visit_share >= 0.45 and visit_gap >= 4:
+        return True
+    return False
 
 
 def _should_use_adaptive_search(complexity: int, reasons: list[str], depth: int | None) -> bool:
@@ -645,6 +804,8 @@ def _should_use_adaptive_search(complexity: int, reasons: list[str], depth: int 
         or 'best_fast_move_allows_mate' in reason_set
         or 'best_fast_move_allows_mate_two' in reason_set
         or 'best_fast_move_allows_promotion_threat' in reason_set
+        or 'best_fast_move_allows_queen_capture' in reason_set
+        or 'best_fast_move_allows_rook_capture' in reason_set
     ):
         return True
     if complexity >= 6:
@@ -886,48 +1047,83 @@ def fastmove(req: FastMoveRequest):
     fast_score_debug = _fast_score_diagnostics(board, candidates)
     complexity, adaptive_reasons = _fastmove_complexity(board, candidates)
     decisive_fast_choice = _is_decisive_fast_choice(board, candidates, adaptive_reasons)
-    use_adaptive_search = bool(
+    full_adaptive_search = bool(
         req.adaptive
         and not decisive_fast_choice
         and _should_use_adaptive_search(complexity, adaptive_reasons, req.depth)
     )
     light_adaptive_search = bool(
-        use_adaptive_search
+        req.adaptive
+        and not full_adaptive_search
+        and not decisive_fast_choice
         and _is_light_adaptive_search(complexity, adaptive_reasons, req.depth)
     )
-    simulations = (
-        _adaptive_simulations(req.depth, complexity, req.max_simulations, light=light_adaptive_search)
+    use_adaptive_search = bool(req.adaptive)
+    baseline_adaptive_probe = bool(use_adaptive_search and not full_adaptive_search and not light_adaptive_search)
+    light_budget = bool(not full_adaptive_search)
+    simulation_steps = (
+        _adaptive_simulation_steps(req.depth, complexity, req.max_simulations, light=light_budget)
         if use_adaptive_search
-        else 0
+        else []
     )
+    simulations = simulation_steps[-1] if simulation_steps else 0
+    simulation_total = sum(simulation_steps)
+    confidence_stop = False
     search_ms = 0.0
     source = 'fast_policy'
     rejected_safety_reasons: list[str] = []
     mcts_root_debug: list[dict] = []
+    mcts_attempts: list[dict] = []
 
-    if simulations > 0:
+    if simulation_steps:
         search_start = time.perf_counter()
         try:
-            mcts_move, mcts_san, mcts_root_debug = _best_move_with_mcts(
-                model,
-                board,
-                _get_device(),
-                simulations,
-                include_diagnostics=True,
-            )
-            mcts_safety = _move_safety_flags(board, mcts_move)
-            safe_fallback = _safe_candidate_fallback(board, candidates) if _has_safety_risk(mcts_safety) else None
-            if safe_fallback is not None and safe_fallback[0] != mcts_move:
-                move, san, _fallback_safety = safe_fallback
-                rejected_safety_reasons = [key for key, value in mcts_safety.items() if value]
-                logger.warning(
-                    f"/fastmove MCTS rejected safety risk move={mcts_move}; "
-                    f"fallback={move} | risks={rejected_safety_reasons}"
+            for step_simulations in simulation_steps:
+                mcts_move, mcts_san, mcts_root_debug = _best_move_with_mcts(
+                    model,
+                    board,
+                    _get_device(),
+                    step_simulations,
+                    include_diagnostics=True,
                 )
-                source = 'adaptive_mcts_rejected_safety'
-            else:
-                move, san = mcts_move, mcts_san
-                source = 'adaptive_mcts'
+                mcts_safety = _move_safety_flags(board, mcts_move)
+                step_confident = _mcts_confident_enough(
+                    fast_move=fast_move,
+                    mcts_move=mcts_move,
+                    root_debug=mcts_root_debug,
+                    safety_flags=mcts_safety,
+                    light=light_budget,
+                    current_simulations=step_simulations,
+                )
+                mcts_attempts.append({
+                    'sims': step_simulations,
+                    'move': mcts_move,
+                    'san': mcts_san,
+                    'safety': mcts_safety,
+                    'confident': step_confident,
+                    'root': mcts_root_debug[:5],
+                })
+                safe_fallback = _safe_candidate_fallback(board, candidates) if _has_safety_risk(mcts_safety) else None
+                if safe_fallback is not None and safe_fallback[0] != mcts_move:
+                    move, san, _fallback_safety = safe_fallback
+                    rejected_safety_reasons = [key for key, value in mcts_safety.items() if value]
+                    logger.warning(
+                        f"/fastmove MCTS rejected safety risk move={mcts_move}; "
+                        f"fallback={move} | risks={rejected_safety_reasons}"
+                    )
+                    source = 'adaptive_mcts_rejected_safety'
+                    confidence_stop = True
+                    break
+
+                if baseline_adaptive_probe and not step_confident:
+                    move, san = fast_move, fast_san
+                    source = 'adaptive_probe_kept_fast'
+                else:
+                    move, san = mcts_move, mcts_san
+                    source = 'adaptive_mcts_confident' if step_confident else 'adaptive_mcts'
+                if step_confident or step_simulations == simulation_steps[-1]:
+                    confidence_stop = step_confident
+                    break
         except Exception:
             logger.exception("/fastmove adaptive MCTS failed; falling back to fast policy")
         search_ms = _elapsed_ms(search_start)
@@ -950,6 +1146,7 @@ def fastmove(req: FastMoveRequest):
         'raw_policy_top': raw_policy_top[:5],
         'fast_scores': fast_score_debug,
         'mcts_root': mcts_root_debug[:5],
+        'mcts_attempts': mcts_attempts,
     }
     logger.info(
         f"/fastmove DECISION_DEBUG | raw_policy_top={decision_debug['raw_policy_top']} | "
@@ -961,7 +1158,8 @@ def fastmove(req: FastMoveRequest):
         f"predict_ms={predict_ms} | rank_ms={rank_ms} | search_ms={search_ms} | "
         f"total_ms={total_ms} | candidates={len(candidates)} | complexity={complexity} | "
         f"adaptive_search={use_adaptive_search} | decisive_fast={decisive_fast_choice} | "
-        f"light_adaptive={light_adaptive_search} | sims={simulations} | reasons={adaptive_reasons} | "
+        f"light_adaptive={light_adaptive_search} | sims={simulations} | steps={simulation_steps} | "
+        f"sim_total={simulation_total} | confidence_stop={confidence_stop} | reasons={adaptive_reasons} | "
         f"final_safety={final_safety} | rejected_safety={rejected_safety_reasons}"
     )
 
@@ -979,6 +1177,9 @@ def fastmove(req: FastMoveRequest):
             'decisive_fast': decisive_fast_choice,
             'light_adaptive': light_adaptive_search,
             'simulations': simulations,
+            'simulation_steps': simulation_steps,
+            'simulation_total': simulation_total,
+            'confidence_stop': confidence_stop,
             'max_simulations': req.max_simulations,
             'final_safety': final_safety,
             'rejected_safety': rejected_safety_reasons,
