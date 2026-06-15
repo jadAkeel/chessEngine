@@ -46,3 +46,19 @@ def test_reported_loss_complexity_marks_promotion_threat():
 
     assert "best_fast_move_allows_promotion_threat" in reasons
     assert _should_use_adaptive_search(complexity, reasons, depth=6) is True
+
+
+def test_hanging_queen_candidate_triggers_search_and_fallback():
+    board = chess.Board("3qk3/8/8/8/2P5/8/8/4K3 b - - 0 1")
+    candidates = [
+        {"uci": "d8d5", "score": 1000.0},
+        {"uci": "d8e7", "score": 100.0},
+    ]
+
+    complexity, reasons = _fastmove_complexity(board, candidates)
+    fallback = _safe_candidate_fallback(board, candidates)
+
+    assert "best_fast_move_allows_queen_capture" in reasons
+    assert _should_use_adaptive_search(complexity, reasons, depth=6) is True
+    assert fallback is not None
+    assert fallback[0] == "d8e7"
