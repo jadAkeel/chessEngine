@@ -36,10 +36,10 @@ def test_find_mate_in_one_from_reported_game():
 
 
 def test_adaptive_simulations_start_from_minimum_probe_for_quiet_positions():
-    assert _adaptive_simulations(depth=6, complexity=0, max_simulations=96) == 32
-    assert _adaptive_simulations(depth=6, complexity=1, max_simulations=96) == 32
-    assert _adaptive_simulations(depth=6, complexity=2, max_simulations=96) == 32
-    assert _adaptive_simulation_steps(depth=6, complexity=0, max_simulations=96) == [32]
+    assert _adaptive_simulations(depth=6, complexity=0, max_simulations=96) == 12
+    assert _adaptive_simulations(depth=6, complexity=1, max_simulations=96) == 12
+    assert _adaptive_simulations(depth=6, complexity=2, max_simulations=96) == 12
+    assert _adaptive_simulation_steps(depth=6, complexity=0, max_simulations=96) == [12]
 
 
 def test_adaptive_simulations_raise_budget_for_complex_positions():
@@ -53,10 +53,10 @@ def test_adaptive_simulations_raise_budget_for_complex_positions():
 
 
 def test_unsafe_mcts_probe_can_retry_higher_budget():
-    assert _has_later_simulation_step(32, [32, 48, 64]) is True
-    assert _has_later_simulation_step(48, [32, 48, 64]) is True
-    assert _has_later_simulation_step(64, [32, 48, 64]) is False
-    assert _has_later_simulation_step(32, [32]) is False
+    assert _has_later_simulation_step(12, [12, 48, 64]) is True
+    assert _has_later_simulation_step(48, [12, 48, 64]) is True
+    assert _has_later_simulation_step(64, [12, 48, 64]) is False
+    assert _has_later_simulation_step(12, [12]) is False
 
 
 def test_light_adaptive_search_uses_small_budget_for_close_forcing_choices():
@@ -64,8 +64,8 @@ def test_light_adaptive_search_uses_small_budget_for_close_forcing_choices():
 
     assert _should_use_adaptive_search(4, reasons, depth=6) is True
     assert _is_light_adaptive_search(4, reasons, depth=6) is True
-    assert _adaptive_simulations(depth=6, complexity=4, max_simulations=96, light=True) == 48
-    assert _adaptive_simulation_steps(depth=6, complexity=4, max_simulations=96, light=True) == [48]
+    assert _adaptive_simulations(depth=6, complexity=4, max_simulations=96, light=True) == 12
+    assert _adaptive_simulation_steps(depth=6, complexity=4, max_simulations=96, light=True) == [12]
 
 
 def test_light_adaptive_search_runs_for_maybe_tactical_positions():
@@ -98,7 +98,7 @@ def test_full_adaptive_search_does_not_confidence_stop_at_first_probe():
         root_debug=root_debug,
         safety_flags={},
         light=False,
-        current_simulations=32,
+        current_simulations=12,
     ) is False
     assert _mcts_confident_enough(
         fast_move="e2e4",
@@ -106,7 +106,7 @@ def test_full_adaptive_search_does_not_confidence_stop_at_first_probe():
         root_debug=root_debug,
         safety_flags={},
         light=True,
-        current_simulations=32,
+        current_simulations=12,
     ) is True
 
 
