@@ -67,8 +67,8 @@ mcts:
   min_resign_plies: 60
   inference_batch_size: 24
   virtual_loss: 1.0
-  queen_blunder_penalty: 0.75
-  queen_hanging_penalty: 0.55
+  queen_blunder_penalty: 0.85
+  queen_hanging_penalty: 0.62
   queen_sac_compensation_threshold: 900
   piece_penalties:
     PAWN:
