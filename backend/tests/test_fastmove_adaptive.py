@@ -43,19 +43,19 @@ def test_adaptive_simulations_start_from_minimum_probe_for_quiet_positions():
 
 
 def test_adaptive_simulations_raise_budget_for_complex_positions():
-    assert _adaptive_simulations(depth=6, complexity=3, max_simulations=96) == 48
+    assert _adaptive_simulations(depth=6, complexity=3, max_simulations=96) == 30
     assert _adaptive_simulations(depth=6, complexity=4, max_simulations=96) == 64
     assert _adaptive_simulations(depth=6, complexity=6, max_simulations=96) == 76
     assert _adaptive_simulations(depth=6, complexity=8, max_simulations=96) == 96
     assert _adaptive_simulations(depth=10, complexity=8, max_simulations=96) == 96
-    assert _adaptive_simulation_steps(depth=6, complexity=3, max_simulations=96) == [48]
+    assert _adaptive_simulation_steps(depth=6, complexity=3, max_simulations=96) == [30]
     assert _adaptive_simulation_steps(depth=6, complexity=8, max_simulations=96) == [96]
 
 
 def test_unsafe_mcts_probe_can_retry_higher_budget():
-    assert _has_later_simulation_step(12, [12, 48, 64]) is True
-    assert _has_later_simulation_step(48, [12, 48, 64]) is True
-    assert _has_later_simulation_step(64, [12, 48, 64]) is False
+    assert _has_later_simulation_step(12, [12, 30, 64]) is True
+    assert _has_later_simulation_step(30, [12, 30, 64]) is True
+    assert _has_later_simulation_step(64, [12, 30, 64]) is False
     assert _has_later_simulation_step(12, [12]) is False
 
 
@@ -64,8 +64,8 @@ def test_light_adaptive_search_uses_small_budget_for_close_forcing_choices():
 
     assert _should_use_adaptive_search(4, reasons, depth=6) is True
     assert _is_light_adaptive_search(4, reasons, depth=6) is True
-    assert _adaptive_simulations(depth=6, complexity=4, max_simulations=96, light=True) == 12
-    assert _adaptive_simulation_steps(depth=6, complexity=4, max_simulations=96, light=True) == [12]
+    assert _adaptive_simulations(depth=6, complexity=4, max_simulations=96, light=True) == 30
+    assert _adaptive_simulation_steps(depth=6, complexity=4, max_simulations=96, light=True) == [30]
 
 
 def test_light_adaptive_search_runs_for_maybe_tactical_positions():
