@@ -9,6 +9,7 @@ from app.api.main import (
     _is_decisive_fast_choice,
     _is_light_adaptive_search,
     _mcts_confident_enough,
+    _move_safety_flags,
     _move_allows_forced_mate_in_two,
     _move_allows_mate_in_one,
     _move_allows_queen_capture,
@@ -35,25 +36,27 @@ def test_find_mate_in_one_from_reported_game():
 
 
 def test_adaptive_simulations_start_from_minimum_probe_for_quiet_positions():
-    assert _adaptive_simulations(depth=6, complexity=0, max_simulations=96) == 8
-    assert _adaptive_simulations(depth=6, complexity=1, max_simulations=96) == 8
-    assert _adaptive_simulations(depth=6, complexity=2, max_simulations=96) == 8
-    assert _adaptive_simulation_steps(depth=6, complexity=0, max_simulations=96) == [8]
+    assert _adaptive_simulations(depth=6, complexity=0, max_simulations=96) == 32
+    assert _adaptive_simulations(depth=6, complexity=1, max_simulations=96) == 32
+    assert _adaptive_simulations(depth=6, complexity=2, max_simulations=96) == 32
+    assert _adaptive_simulation_steps(depth=6, complexity=0, max_simulations=96) == [32]
 
 
 def test_adaptive_simulations_raise_budget_for_complex_positions():
-    assert _adaptive_simulations(depth=6, complexity=3, max_simulations=96) == 28
-    assert _adaptive_simulations(depth=6, complexity=8, max_simulations=96) == 72
+    assert _adaptive_simulations(depth=6, complexity=3, max_simulations=96) == 48
+    assert _adaptive_simulations(depth=6, complexity=4, max_simulations=96) == 64
+    assert _adaptive_simulations(depth=6, complexity=6, max_simulations=96) == 76
+    assert _adaptive_simulations(depth=6, complexity=8, max_simulations=96) == 96
     assert _adaptive_simulations(depth=10, complexity=8, max_simulations=96) == 96
-    assert _adaptive_simulation_steps(depth=6, complexity=3, max_simulations=96) == [8, 16, 28]
-    assert _adaptive_simulation_steps(depth=6, complexity=8, max_simulations=96) == [8, 16, 32, 72]
+    assert _adaptive_simulation_steps(depth=6, complexity=3, max_simulations=96) == [48]
+    assert _adaptive_simulation_steps(depth=6, complexity=8, max_simulations=96) == [96]
 
 
 def test_unsafe_mcts_probe_can_retry_higher_budget():
-    assert _has_later_simulation_step(8, [8, 16, 40]) is True
-    assert _has_later_simulation_step(16, [8, 16, 40]) is True
-    assert _has_later_simulation_step(40, [8, 16, 40]) is False
-    assert _has_later_simulation_step(8, [8]) is False
+    assert _has_later_simulation_step(32, [32, 48, 64]) is True
+    assert _has_later_simulation_step(48, [32, 48, 64]) is True
+    assert _has_later_simulation_step(64, [32, 48, 64]) is False
+    assert _has_later_simulation_step(32, [32]) is False
 
 
 def test_light_adaptive_search_uses_small_budget_for_close_forcing_choices():
@@ -61,8 +64,8 @@ def test_light_adaptive_search_uses_small_budget_for_close_forcing_choices():
 
     assert _should_use_adaptive_search(4, reasons, depth=6) is True
     assert _is_light_adaptive_search(4, reasons, depth=6) is True
-    assert _adaptive_simulations(depth=6, complexity=4, max_simulations=96, light=True) == 16
-    assert _adaptive_simulation_steps(depth=6, complexity=4, max_simulations=96, light=True) == [8, 16]
+    assert _adaptive_simulations(depth=6, complexity=4, max_simulations=96, light=True) == 48
+    assert _adaptive_simulation_steps(depth=6, complexity=4, max_simulations=96, light=True) == [48]
 
 
 def test_light_adaptive_search_runs_for_maybe_tactical_positions():
@@ -80,7 +83,7 @@ def test_light_adaptive_search_keeps_full_budget_for_tactical_danger():
         ["forcing_moves_available", "top_moves_very_close", "best_fast_move_allows_mate_two"],
         depth=6,
     ) is False
-    assert _adaptive_simulations(depth=6, complexity=5, max_simulations=96, light=False) == 40
+    assert _adaptive_simulations(depth=6, complexity=5, max_simulations=96, light=False) == 64
 
 
 def test_full_adaptive_search_does_not_confidence_stop_at_first_probe():
@@ -95,7 +98,7 @@ def test_full_adaptive_search_does_not_confidence_stop_at_first_probe():
         root_debug=root_debug,
         safety_flags={},
         light=False,
-        current_simulations=8,
+        current_simulations=32,
     ) is False
     assert _mcts_confident_enough(
         fast_move="e2e4",
@@ -103,7 +106,7 @@ def test_full_adaptive_search_does_not_confidence_stop_at_first_probe():
         root_debug=root_debug,
         safety_flags={},
         light=True,
-        current_simulations=8,
+        current_simulations=32,
     ) is True
 
 
@@ -206,6 +209,35 @@ def test_fast_score_prefers_development_over_extra_quiet_pawn_push():
     develop_knight = chess.Move.from_uci("b8c6")
 
     assert _score_fast_candidate(board, develop_knight, 0.30) > _score_fast_candidate(board, extra_pawn, 0.36)
+
+
+def test_fast_score_prefers_profitable_rook_capture_from_reported_game():
+    board = chess.Board()
+    for san in (
+        "e4 e5 Nf3 b6 d4 exd4 Nxd4 Bb7 Bf4 Bb4+ c3 Bc5 b4 Be7 "
+        "e5 d5 Bd3 Nd7 c4 dxc4 Bxc4 Bxg2 Rg1 Bxb4+ Nd2 Bh3 Nf5 "
+        "Bxf5 Rb1 Qe7 Qb3 O-O-O Qxb4 Nxe5 Qxe7 Nd3+ Bxd3 Nxe7 "
+        "Bg5 Rhe8 Nf3 Bxd3 Rc1 f6 Rg4 fxg5 Kd2 h6 a4 Bc4+ "
+        "Kc3 Be2 Rc4 Bxf3 Kb2 Nf5 Rxc7+ Kb8 a5 Rd2+ Kb1 Rxf2 "
+        "axb6 axb6 R1c4 Rxh2 R7c6"
+    ).split():
+        board.push_san(san)
+
+    capture_rook = chess.Move.from_uci("f3c6")
+    quiet_king = chess.Move.from_uci("b8b7")
+
+    assert board.san(capture_rook) == "Bxc6"
+    assert board.san(quiet_king) == "Kb7"
+    assert _score_fast_candidate(board, capture_rook, 0.10) > _score_fast_candidate(board, quiet_king, 0.10)
+    assert _move_safety_flags(board, capture_rook.uci())["valuable_piece_capture"] is False
+    assert _is_decisive_fast_choice(
+        board,
+        [
+            {"uci": capture_rook.uci(), "score": 818.0},
+            {"uci": quiet_king.uci(), "score": 158.0},
+        ],
+        ["many_forcing_moves", "best_fast_move_allows_minor_capture", "high_value_capture"],
+    ) is True
 
 
 def test_rook_and_minor_piece_hanging_moves_are_marked_unsafe():

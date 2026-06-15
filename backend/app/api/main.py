@@ -230,12 +230,8 @@ def _fast_principle_penalty(board: chess.Board, move: chess.Move, candidate: che
 def _score_fast_candidate(board: chess.Board, move: chess.Move, policy_prob: float) -> float:
     score = float(policy_prob) * 1000.0
     moving_piece = board.piece_at(move.from_square)
-    captured_piece = board.piece_at(move.to_square)
-
-    if captured_piece is not None:
-        score += _piece_value(captured_piece.piece_type)
-    if move.promotion:
-        score += _piece_value(move.promotion)
+    material_gain = _material_gain_for_move(board, move)
+    score += material_gain
 
     candidate = board.copy(stack=False)
     candidate.push(move)
@@ -252,10 +248,11 @@ def _score_fast_candidate(board: chess.Board, move: chess.Move, policy_prob: flo
     if _side_can_capture_queen(candidate):
         score -= 3000.0
     hanging_value = _max_valuable_capture_value(candidate, min_value=_piece_value(chess.KNIGHT))
-    if hanging_value >= _piece_value(chess.ROOK):
-        score -= hanging_value * 2.0
-    elif hanging_value >= _piece_value(chess.KNIGHT):
-        score -= hanging_value * 1.25
+    net_hanging_value = max(0, hanging_value - material_gain)
+    if net_hanging_value >= _piece_value(chess.ROOK):
+        score -= net_hanging_value * 2.0
+    elif net_hanging_value >= _piece_value(chess.KNIGHT):
+        score -= net_hanging_value * 1.25
     if candidate.is_check():
         score += 60.0
 
@@ -328,6 +325,13 @@ def _captured_value_for_move(board: chess.Board, move: chess.Move) -> int:
     return _piece_value(captured_piece.piece_type)
 
 
+def _material_gain_for_move(board: chess.Board, move: chess.Move) -> int:
+    material_gain = _captured_value_for_move(board, move)
+    if move.promotion:
+        material_gain += _piece_value(move.promotion)
+    return material_gain
+
+
 def _is_decisive_fast_choice(board: chess.Board, candidates: list[dict], reasons: list[str]) -> bool:
     reason_set = set(reasons)
     if {
@@ -337,8 +341,6 @@ def _is_decisive_fast_choice(board: chess.Board, candidates: list[dict], reasons
         'best_fast_move_allows_mate_two',
         'best_fast_move_allows_promotion_threat',
         'best_fast_move_allows_queen_capture',
-        'best_fast_move_allows_rook_capture',
-        'best_fast_move_allows_minor_capture',
     }.intersection(reason_set):
         return False
     if len(candidates) < 2:
@@ -515,7 +517,9 @@ def _move_allows_valuable_piece_capture(board: chess.Board, move_uci: str, min_v
 
     candidate = _board_after_move(board, move)
     threshold = _piece_value(chess.KNIGHT) if min_value is None else int(min_value)
-    return _max_valuable_capture_value(candidate, min_value=threshold) >= threshold
+    hanging_value = _max_valuable_capture_value(candidate, min_value=threshold)
+    net_hanging_value = max(0, hanging_value - _material_gain_for_move(board, move))
+    return net_hanging_value >= threshold
 
 
 def _side_can_capture_queen(board: chess.Board) -> bool:
@@ -721,19 +725,17 @@ def _adaptive_simulations(
     depth = max(1, min(10, int(depth or 6)))
 
     if light:
-        base = 16 if complexity >= 3 else 8
+        base = 48 if complexity >= 3 else 32
     elif complexity >= 8:
-        base = 72
+        base = 96
     elif complexity >= 6:
-        base = 56
+        base = 76
     elif complexity >= 4:
-        base = 40
+        base = 64
     elif complexity >= 3:
-        base = 28
-    elif complexity >= 2 and depth >= 7:
-        base = 18
+        base = 48
     else:
-        base = 8
+        base = 32
 
     depth_factor = {
         1: 0.25,
@@ -749,10 +751,10 @@ def _adaptive_simulations(
     }[depth]
     simulations = int(round(base * depth_factor))
 
-    cap = 120 if max_simulations is None else max(8, min(180, int(max_simulations)))
+    cap = 120 if max_simulations is None else max(32, min(180, int(max_simulations)))
     if light:
-        cap = min(cap, 16)
-    return min(cap, max(8, simulations))
+        cap = min(cap, 48)
+    return min(cap, max(32, simulations))
 
 
 def _adaptive_simulation_steps(
@@ -764,21 +766,7 @@ def _adaptive_simulation_steps(
     target = _adaptive_simulations(depth, complexity, max_simulations, light=light)
     if target <= 0:
         return []
-    if light:
-        return [8, target] if target > 8 else [8]
-    if target <= 16:
-        return [8, target] if target > 8 else [8]
-    if target <= 40:
-        steps = [8, 16, target]
-    else:
-        steps = [8, 16, min(32, target), target]
-
-    unique_steps: list[int] = []
-    for step in steps:
-        step = int(step)
-        if step > 0 and step not in unique_steps:
-            unique_steps.append(step)
-    return unique_steps
+    return [int(target)]
 
 
 def _has_later_simulation_step(current_simulations: int, simulation_steps: list[int]) -> bool:
@@ -799,10 +787,10 @@ def _mcts_confident_enough(
         return False
     if light and mcts_move == fast_move:
         return True
-    if not light and current_simulations < 16:
+    if not light and current_simulations < 32:
         return False
     if not root_debug:
-        return mcts_move == fast_move and current_simulations >= 16
+        return mcts_move == fast_move and current_simulations >= 48
 
     by_visits = sorted(root_debug, key=lambda item: int(item.get('visits', 0)), reverse=True)
     top = by_visits[0]
@@ -815,11 +803,11 @@ def _mcts_confident_enough(
     visit_share = top_visits / total_visits
     visit_gap = top_visits - second_visits
 
-    if mcts_move == fast_move and visit_gap >= 2:
+    if current_simulations >= 48 and mcts_move == fast_move and visit_gap >= 2:
         return True
-    if current_simulations >= 16 and visit_share >= 0.55 and visit_gap >= 3:
+    if current_simulations >= 48 and visit_share >= 0.55 and visit_gap >= 3:
         return True
-    if current_simulations >= 28 and visit_share >= 0.45 and visit_gap >= 4:
+    if current_simulations >= 76 and visit_share >= 0.45 and visit_gap >= 4:
         return True
     return False
 
@@ -1086,7 +1074,7 @@ def fastmove(req: FastMoveRequest):
         and not decisive_fast_choice
         and _is_light_adaptive_search(complexity, adaptive_reasons, req.depth)
     )
-    use_adaptive_search = bool(req.adaptive)
+    use_adaptive_search = bool(full_adaptive_search or light_adaptive_search)
     baseline_adaptive_probe = bool(use_adaptive_search and not full_adaptive_search and not light_adaptive_search)
     light_budget = bool(not full_adaptive_search)
     simulation_steps = (
