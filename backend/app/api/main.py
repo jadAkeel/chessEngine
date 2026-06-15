@@ -15,6 +15,7 @@ from app.infra.config import get_current_config, load_config, validate_config
 from app.infra.device import select_device
 from app.infra.logging import setup_logging
 from app.infra.runtime import configure_torch_runtime
+from app.game.principles import principle_penalty_components
 from app.mcts.search import MCTS
 from app.model.checkpoint import CheckpointLoadError, load_checkpoint, load_compatible_weights
 from app.model.network import ChessNet
@@ -207,6 +208,25 @@ def _piece_value(piece_type: chess.PieceType | None) -> int:
     return values.get(piece_type, 0)
 
 
+def _is_opening_minor_development(board: chess.Board, move: chess.Move) -> bool:
+    piece = board.piece_at(move.from_square)
+    if piece is None or piece.piece_type not in {chess.KNIGHT, chess.BISHOP}:
+        return False
+    home_rank = 0 if piece.color == chess.WHITE else 7
+    return chess.square_rank(move.from_square) == home_rank and chess.square_rank(move.to_square) != home_rank
+
+
+def _fast_principle_penalty(board: chess.Board, move: chess.Move, candidate: chess.Board) -> float:
+    if board.is_capture(move) or move.promotion or candidate.is_check():
+        return 0.0
+    return float(principle_penalty_components(
+        board,
+        candidate,
+        move,
+        get_current_config().principle_penalties,
+    ).total)
+
+
 def _score_fast_candidate(board: chess.Board, move: chess.Move, policy_prob: float) -> float:
     score = float(policy_prob) * 1000.0
     moving_piece = board.piece_at(move.from_square)
@@ -219,6 +239,9 @@ def _score_fast_candidate(board: chess.Board, move: chess.Move, policy_prob: flo
 
     candidate = board.copy(stack=False)
     candidate.push(move)
+    score -= _fast_principle_penalty(board, move, candidate) * 1400.0
+    if _is_opening_minor_development(board, move):
+        score += 45.0
 
     if candidate.is_checkmate():
         return score + 100000.0
@@ -758,6 +781,11 @@ def _adaptive_simulation_steps(
     return unique_steps
 
 
+def _has_later_simulation_step(current_simulations: int, simulation_steps: list[int]) -> bool:
+    current = int(current_simulations)
+    return any(int(step) > current for step in simulation_steps)
+
+
 def _mcts_confident_enough(
     *,
     fast_move: str,
@@ -1067,7 +1095,7 @@ def fastmove(req: FastMoveRequest):
         else []
     )
     simulations = simulation_steps[-1] if simulation_steps else 0
-    simulation_total = sum(simulation_steps)
+    simulation_total = 0
     confidence_stop = False
     search_ms = 0.0
     source = 'fast_policy'
@@ -1105,8 +1133,15 @@ def fastmove(req: FastMoveRequest):
                 })
                 safe_fallback = _safe_candidate_fallback(board, candidates) if _has_safety_risk(mcts_safety) else None
                 if safe_fallback is not None and safe_fallback[0] != mcts_move:
-                    move, san, _fallback_safety = safe_fallback
                     rejected_safety_reasons = [key for key, value in mcts_safety.items() if value]
+                    if _has_later_simulation_step(step_simulations, simulation_steps):
+                        logger.info(
+                            f"/fastmove MCTS safety risk move={mcts_move}; "
+                            f"retrying with higher budget | risks={rejected_safety_reasons}"
+                        )
+                        continue
+
+                    move, san, _fallback_safety = safe_fallback
                     logger.warning(
                         f"/fastmove MCTS rejected safety risk move={mcts_move}; "
                         f"fallback={move} | risks={rejected_safety_reasons}"
@@ -1127,6 +1162,7 @@ def fastmove(req: FastMoveRequest):
         except Exception:
             logger.exception("/fastmove adaptive MCTS failed; falling back to fast policy")
         search_ms = _elapsed_ms(search_start)
+        simulation_total = sum(int(attempt.get('sims', 0)) for attempt in mcts_attempts)
 
     final_safety = _move_safety_flags(board, move)
     if _has_safety_risk(final_safety):
