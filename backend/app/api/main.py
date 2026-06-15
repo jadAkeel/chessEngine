@@ -246,7 +246,7 @@ def _score_fast_candidate(board: chess.Board, move: chess.Move, policy_prob: flo
     if _side_can_create_promotion_threat(candidate):
         score -= 1200.0
     if _side_can_capture_queen(candidate):
-        score -= 3000.0
+        score -= 3600.0
     hanging_value = _max_valuable_capture_value(candidate, min_value=_piece_value(chess.KNIGHT))
     net_hanging_value = max(0, hanging_value - material_gain)
     if net_hanging_value >= _piece_value(chess.ROOK):
