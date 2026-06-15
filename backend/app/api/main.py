@@ -725,7 +725,7 @@ def _adaptive_simulations(
     depth = max(1, min(10, int(depth or 6)))
 
     if light:
-        base = 12
+        base = 30 if complexity >= 3 else 12
     elif complexity >= 8:
         base = 96
     elif complexity >= 6:
@@ -733,7 +733,7 @@ def _adaptive_simulations(
     elif complexity >= 4:
         base = 64
     elif complexity >= 3:
-        base = 48
+        base = 30
     else:
         base = 12
 
