@@ -24,8 +24,8 @@ DEVICE = "cuda"
 TRAIN_STEPS_PER_ITER = 10000
 BUFFER_SIZE = 5000000
 MAX_SAMPLES = 75000000
-MIN_FULLMOVE = 1
-MAX_FULLMOVE = 12
+MIN_FULLMOVE = 0
+MAX_FULLMOVE = 0
 AUTOSAVE_MODE = "kaggle"
 AUTOSAVE_EVERY = 1
 DELETE_OLD_KAGGLE_VERSIONS = True
@@ -248,6 +248,10 @@ print("BASE_MODEL =", BASE_MODEL if BASE_MODEL else "none; training starts from 
 env = os.environ.copy()
 env["PYTHONPATH"] = str(BACKEND_DIR)
 env.setdefault("PYTHONIOENCODING", "utf-8")
+
+MIN_FULLMOVE = int(globals().get("MIN_FULLMOVE", 0))
+MAX_FULLMOVE = int(globals().get("MAX_FULLMOVE", 0))
+print(f"Fullmove filter: min={MIN_FULLMOVE}, max={MAX_FULLMOVE} (0 means no limit)", flush=True)
 
 train_cmd = [
     sys.executable,
