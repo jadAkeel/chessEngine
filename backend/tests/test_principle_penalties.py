@@ -159,6 +159,15 @@ class PrinciplePenaltyTests(unittest.TestCase):
         self.assertGreater(components.get("opening_development", 0.0), 0.0)
         self.assertGreater(components.get("center_control", 0.0), 0.0)
 
+    def test_extra_pawn_move_is_penalized_when_one_minor_remains_home(self):
+        board = chess.Board("rn1qk2r/1bp1n1bp/pp1p1pp1/4p3/1PBPP1P1/2N1BN1P/P1P2P2/R2Q1RK1 b kq - 0 8")
+
+        pawn_components = self._components_for_board(board, chess.Move.from_uci("c7c6"))
+        knight_components = self._components_for_board(board, chess.Move.from_uci("b8c6"))
+
+        self.assertGreater(pawn_components.get("opening_development", 0.0), 0.0)
+        self.assertEqual(knight_components.get("opening_development", 0.0), 0.0)
+
     def test_rook_retreat_after_early_lift_is_penalized(self):
         board = self._board_after_san(
             (

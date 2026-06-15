@@ -125,7 +125,7 @@ def _opening_development(before: chess.Board, after: chess.Board, move: chess.Mo
         return
 
     home_minors = _minor_pieces_on_home_squares(before, mover)
-    if home_minors < 2:
+    if home_minors <= 0:
         return
 
     if piece.piece_type == chess.PAWN:
@@ -322,10 +322,13 @@ def _minor_pieces_on_home_squares(board: chess.Board, color: chess.Color) -> int
 def _opening_phase_scale(board: chess.Board, color: chess.Color) -> float:
     if _endgame_like(board):
         return 0.0
-    if _minor_pieces_on_home_squares(board, color) <= 1:
+    home_minors = _minor_pieces_on_home_squares(board, color)
+    if home_minors <= 0:
         return 0.0
     if board.fullmove_number > 12:
         return 0.0
+    if home_minors == 1:
+        return 0.55 if board.fullmove_number <= 8 else max(0.0, 0.55 * (13.0 - float(board.fullmove_number)) / 5.0)
     if board.fullmove_number <= 8:
         return 1.0
     return max(0.0, (13.0 - float(board.fullmove_number)) / 5.0)

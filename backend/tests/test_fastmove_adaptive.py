@@ -5,6 +5,7 @@ from app.api.main import (
     _adaptive_simulation_steps,
     _fastmove_complexity,
     _find_mate_in_one,
+    _has_later_simulation_step,
     _is_decisive_fast_choice,
     _is_light_adaptive_search,
     _mcts_confident_enough,
@@ -46,6 +47,13 @@ def test_adaptive_simulations_raise_budget_for_complex_positions():
     assert _adaptive_simulations(depth=10, complexity=8, max_simulations=96) == 96
     assert _adaptive_simulation_steps(depth=6, complexity=3, max_simulations=96) == [8, 16, 28]
     assert _adaptive_simulation_steps(depth=6, complexity=8, max_simulations=96) == [8, 16, 32, 72]
+
+
+def test_unsafe_mcts_probe_can_retry_higher_budget():
+    assert _has_later_simulation_step(8, [8, 16, 40]) is True
+    assert _has_later_simulation_step(16, [8, 16, 40]) is True
+    assert _has_later_simulation_step(40, [8, 16, 40]) is False
+    assert _has_later_simulation_step(8, [8]) is False
 
 
 def test_light_adaptive_search_uses_small_budget_for_close_forcing_choices():
@@ -190,6 +198,14 @@ def test_fast_score_penalizes_hanging_queen():
     safe_queen = chess.Move.from_uci("d8e7")
 
     assert _score_fast_candidate(board, hanging_queen, 0.90) < _score_fast_candidate(board, safe_queen, 0.10)
+
+
+def test_fast_score_prefers_development_over_extra_quiet_pawn_push():
+    board = chess.Board("rn1qk2r/1bp1n1bp/pp1p1pp1/4p3/1PBPP1P1/2N1BN1P/P1P2P2/R2Q1RK1 b kq - 0 8")
+    extra_pawn = chess.Move.from_uci("c7c6")
+    develop_knight = chess.Move.from_uci("b8c6")
+
+    assert _score_fast_candidate(board, develop_knight, 0.30) > _score_fast_candidate(board, extra_pawn, 0.36)
 
 
 def test_rook_and_minor_piece_hanging_moves_are_marked_unsafe():
