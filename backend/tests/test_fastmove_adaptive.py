@@ -97,8 +97,14 @@ def test_light_adaptive_search_uses_small_budget_for_close_forcing_choices():
 
 def test_light_adaptive_search_runs_for_maybe_tactical_positions():
     assert _should_use_adaptive_search(1, ["top_moves_competitive"], depth=6) is False
-    assert _is_light_adaptive_search(1, ["top_moves_competitive"], depth=6) is True
+    # top_moves_competitive alone at low complexity does NOT trigger light adaptive
+    assert _is_light_adaptive_search(1, ["top_moves_competitive"], depth=6) is False
+    assert _is_light_adaptive_search(2, ["top_moves_competitive"], depth=6) is False
     assert _is_light_adaptive_search(2, ["best_fast_move_allows_minor_capture"], depth=6) is True
+    # But top_moves_competitive combined with tactical/forcing reasons DOES trigger
+    assert _is_light_adaptive_search(2, ["top_moves_competitive", "forcing_moves_available"], depth=6) is True
+    assert _is_light_adaptive_search(2, ["top_moves_competitive", "high_value_capture"], depth=6) is True
+    assert _is_light_adaptive_search(3, ["top_moves_competitive"], depth=6) is True
 
 
 def test_light_adaptive_search_keeps_full_budget_for_tactical_danger():

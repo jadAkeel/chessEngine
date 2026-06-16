@@ -725,7 +725,7 @@ def _is_light_adaptive_search(complexity: int, reasons: list[str], depth: int | 
         'few_legal_moves',
     }):
         return False
-    return bool(reason_set.intersection({
+    triggers = reason_set.intersection({
         'forcing_moves_available',
         'many_forcing_moves',
         'top_moves_competitive',
@@ -733,7 +733,12 @@ def _is_light_adaptive_search(complexity: int, reasons: list[str], depth: int | 
         'top_moves_very_close',
         'high_value_capture',
         'best_fast_move_allows_minor_capture',
-    }))
+    })
+    if not triggers:
+        return False
+    if triggers == {'top_moves_competitive'} and complexity <= 2:
+        return False
+    return True
 
 
 def _adaptive_simulations(
