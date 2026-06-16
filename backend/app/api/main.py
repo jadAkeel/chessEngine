@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+import os
 from pathlib import Path
 import time
 
@@ -28,6 +29,13 @@ logger = setup_logging('api.main')
 MODEL: ChessNet | None = None
 DEVICE: str | None = None
 
+# Module-level constants for fastmove quality
+MIN_ADAPTIVE_SIMULATIONS: int = 30
+MID_PROBE_RUNG: int = 64
+HIGH_PROBE_RUNG: int = 96
+LIGHT_MIN_CONFIDENCE_SIMS: int = 30
+COMPLEX_TOPK_BOOST_THRESHOLD: int = 6
+COMPLEX_TOPK_MAX: int = 36
 
 # ================= CONNECTION MANAGER =================
 class ConnectionManager:
@@ -165,7 +173,13 @@ def _load_model():
             )
             logger.warning("⚠️ Loaded PARTIAL weights")
     else:
-        logger.warning("⚠️ NO CHECKPOINT → random weights (BAD)")
+        allow_random = os.environ.get("ALLOW_RANDOM_WEIGHTS", "").lower() in ("1", "true", "yes")
+        if not allow_random:
+            raise RuntimeError(
+                f"Checkpoint not found at '{path}'. "
+                "Set ALLOW_RANDOM_WEIGHTS=1 (or true/yes) to allow random-weight startup (testing only)."
+            )
+        logger.warning("⚠️ NO CHECKPOINT → random weights (testing override)")
 
     model.eval()
     return model, str(device)
@@ -333,6 +347,12 @@ def _material_gain_for_move(board: chess.Board, move: chess.Move) -> int:
 
 
 def _is_decisive_fast_choice(board: chess.Board, candidates: list[dict], reasons: list[str]) -> bool:
+    # Rook/minor capture risk (best_fast_move_allows_rook_capture, _minor_capture)
+    # is intentionally NOT a hard block here.  Such risks are already reflected in
+    # _score_fast_candidate's net-material/safety penalties and in the safety-fallback
+    # layer (see _safe_candidate_fallback).  Adding them here would over-suppress
+    # genuinely winning captures that happen to leave other pieces hanging — a
+    # trade-off better left to the continuous scoring functions.
     reason_set = set(reasons)
     if {
         'king_in_check',
@@ -725,7 +745,7 @@ def _adaptive_simulations(
     depth = max(1, min(10, int(depth or 6)))
 
     if light:
-        base = 30 if complexity >= 3 else 12
+        base = MIN_ADAPTIVE_SIMULATIONS
     elif complexity >= 8:
         base = 96
     elif complexity >= 6:
@@ -735,7 +755,7 @@ def _adaptive_simulations(
     elif complexity >= 3:
         base = 30
     else:
-        base = 12
+        base = MIN_ADAPTIVE_SIMULATIONS
 
     depth_factor = {
         1: 0.25,
@@ -751,10 +771,10 @@ def _adaptive_simulations(
     }[depth]
     simulations = int(round(base * depth_factor))
 
-    cap = 120 if max_simulations is None else max(12, min(180, int(max_simulations)))
+    cap = 120 if max_simulations is None else max(MIN_ADAPTIVE_SIMULATIONS, min(180, int(max_simulations)))
     if light:
         cap = min(cap, 48)
-    return min(cap, max(12, simulations))
+    return min(cap, max(MIN_ADAPTIVE_SIMULATIONS, simulations))
 
 
 def _adaptive_simulation_steps(
@@ -766,7 +786,16 @@ def _adaptive_simulation_steps(
     target = _adaptive_simulations(depth, complexity, max_simulations, light=light)
     if target <= 0:
         return []
-    return [int(target)]
+
+    # Progressive rung ladder: build up from minimum through mid/high rungs.
+    # 76 is deliberately omitted from the static rungs so that when 76 is the
+    # final target it gets appended naturally by the logic below, but when the
+    # target is higher (e.g. 96) there is no extra 76 intermediate step.
+    RUNGS = [MIN_ADAPTIVE_SIMULATIONS, MID_PROBE_RUNG, HIGH_PROBE_RUNG]
+    steps = [r for r in RUNGS if r < target]
+    if not steps or steps[-1] != target:
+        steps.append(target)
+    return steps
 
 
 def _has_later_simulation_step(current_simulations: int, simulation_steps: list[int]) -> bool:
@@ -785,7 +814,7 @@ def _mcts_confident_enough(
 ) -> bool:
     if _has_safety_risk(safety_flags):
         return False
-    if light and mcts_move == fast_move:
+    if light and mcts_move == fast_move and current_simulations >= LIGHT_MIN_CONFIDENCE_SIMS:
         return True
     if not light and current_simulations < 32:
         return False
@@ -1062,6 +1091,16 @@ def fastmove(req: FastMoveRequest):
     fast_move, fast_san = move, san
     fast_score_debug = _fast_score_diagnostics(board, candidates)
     complexity, adaptive_reasons = _fastmove_complexity(board, candidates)
+    # In complex positions, expand the candidate pool for better fast-policy scoring.
+    # Complexity is intentionally NOT recomputed after this expansion so that the
+    # adaptive-search decision path (decisive_fast / full / light / off) remains
+    # based on the original position's assessment — keeping the overall behaviour
+    # stable and predictable regardless of the boosted candidate pool.
+    if complexity >= COMPLEX_TOPK_BOOST_THRESHOLD:
+        raw_policy_top = _legal_moves_with_probs(board, logits, COMPLEX_TOPK_MAX)
+        move, san, candidates = _fast_policy_move(board, logits, COMPLEX_TOPK_MAX, raw_policy_top)
+        fast_move, fast_san = move, san
+        fast_score_debug = _fast_score_diagnostics(board, candidates)
     decisive_fast_choice = _is_decisive_fast_choice(board, candidates, adaptive_reasons)
     full_adaptive_search = bool(
         req.adaptive
@@ -1075,7 +1114,6 @@ def fastmove(req: FastMoveRequest):
         and _is_light_adaptive_search(complexity, adaptive_reasons, req.depth)
     )
     use_adaptive_search = bool(full_adaptive_search or light_adaptive_search)
-    baseline_adaptive_probe = bool(use_adaptive_search and not full_adaptive_search and not light_adaptive_search)
     light_budget = bool(not full_adaptive_search)
     simulation_steps = (
         _adaptive_simulation_steps(req.depth, complexity, req.max_simulations, light=light_budget)
@@ -1138,12 +1176,8 @@ def fastmove(req: FastMoveRequest):
                     confidence_stop = True
                     break
 
-                if baseline_adaptive_probe and not step_confident:
-                    move, san = fast_move, fast_san
-                    source = 'adaptive_probe_kept_fast'
-                else:
-                    move, san = mcts_move, mcts_san
-                    source = 'adaptive_mcts_confident' if step_confident else 'adaptive_mcts'
+                move, san = mcts_move, mcts_san
+                source = 'adaptive_mcts_confident' if step_confident else 'adaptive_mcts'
                 if step_confident or step_simulations == simulation_steps[-1]:
                     confidence_stop = step_confident
                     break
