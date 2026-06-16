@@ -138,14 +138,42 @@ def test_opening_position_low_complexity():
     board = chess.Board(OPENING_POSITION)
     # Opening has many legal moves and no tactical urgency
     candidates = [
-        {"uci": "e2e4", "score": 150.0},
-        {"uci": "d2d4", "score": 140.0},
+        {"uci": "e2e4", "score": 200.0},
+        {"uci": "d2d4", "score": 100.0},
     ]
     complexity, reasons = _fastmove_complexity(board, candidates)
     # Opening should be low-medium complexity
     assert complexity < 6, f"Opening complexity unexpectedly high: {complexity}"
     assert _should_use_adaptive_search(complexity, reasons, depth=6) is False, (
         f"Opening triggered adaptive search: reasons={reasons}"
+    )
+    # Light adaptive search also off for quiet opening with only top_moves_competitive
+    assert _is_light_adaptive_search(complexity, reasons, depth=6) is False, (
+        f"Opening triggered light adaptive search: reasons={reasons}"
+    )
+
+
+def test_opening_position_very_close_scores():
+    """Quiet opening with very-close policy scores: light adaptive, not full adaptive."""
+    board = chess.Board(OPENING_POSITION)
+    # Gap <= 35 triggers top_moves_very_close (complexity +3)
+    candidates = [
+        {"uci": "e2e4", "score": 200.0},
+        {"uci": "d2d4", "score": 180.0},
+    ]
+    complexity, reasons = _fastmove_complexity(board, candidates)
+    # top_moves_very_close raises complexity so expect >= 3
+    assert complexity >= 3, f"Expected complexity >= 3, got {complexity}"
+    assert "top_moves_very_close" in reasons, (
+        f"Expected top_moves_very_close in reasons, got {reasons}"
+    )
+    # Very-close alone is not tactically urgent so full adaptive is off
+    assert _should_use_adaptive_search(complexity, reasons, depth=6) is False, (
+        f"Opening with very-close scores triggered full adaptive: reasons={reasons}"
+    )
+    # But the genuine ambiguity justifies a light adaptive probe
+    assert _is_light_adaptive_search(complexity, reasons, depth=6) is True, (
+        f"Opening with very-close scores should use light adaptive: reasons={reasons}"
     )
 
 
