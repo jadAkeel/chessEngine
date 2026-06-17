@@ -204,6 +204,7 @@ export default function ChessHybridApp() {
   const [lastMoveNote, setLastMoveNote] = useState("");
   const [moveFrom, setMoveFrom] = useState("");
   const [optionSquares, setOptionSquares] = useState({});
+  const [boardWidth, setBoardWidth] = useState(560);
 
   const [isMultiplayer, setIsMultiplayer] = useState(false);
   const [roomId, setRoomId] = useState("");
@@ -211,6 +212,7 @@ export default function ChessHybridApp() {
   const [showPromotionDialog, setShowPromotionDialog] = useState(false);
   const [promotionMoveDetail, setPromotionMoveDetail] = useState(null);
 
+  const boardWrapRef = useRef(null);
   const wsRef = useRef(null);
   const engineWarmupPromiseRef = useRef(null);
   const game = gameRef.current;
@@ -227,6 +229,27 @@ export default function ChessHybridApp() {
 
   useEffect(() => {
     void warmupEngineServer();
+  }, []);
+
+  useEffect(() => {
+    const element = boardWrapRef.current;
+    if (!element) return undefined;
+
+    const updateBoardWidth = () => {
+      const nextWidth = Math.floor(element.getBoundingClientRect().width);
+      if (nextWidth > 0) setBoardWidth(Math.min(nextWidth, 600));
+    };
+
+    updateBoardWidth();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateBoardWidth);
+      return () => window.removeEventListener("resize", updateBoardWidth);
+    }
+
+    const observer = new ResizeObserver(updateBoardWidth);
+    observer.observe(element);
+    return () => observer.disconnect();
   }, []);
 
   useEffect(() => {
@@ -683,9 +706,10 @@ export default function ChessHybridApp() {
               </div>
             </div>
             <div className="rounded-[1.75rem] border border-zinc-800 bg-zinc-950/90 p-2 shadow-inner sm:p-4 flex justify-center">
-              <div className="w-full max-w-[600px] relative">
+              <div ref={boardWrapRef} className="w-full max-w-[600px] relative">
                 <Chessboard
                   id="HybridBoard"
+                  boardWidth={boardWidth}
                   position={fen}
                   onPieceDrop={onDrop}
                   onPieceDragBegin={(piece, square) => {
