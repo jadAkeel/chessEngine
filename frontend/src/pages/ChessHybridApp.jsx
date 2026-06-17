@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
-import { Brain, Loader2, RotateCcw, Swords, Zap, Globe, Users } from "lucide-react";
+import { Brain, CircleEqual, Loader2, RotateCcw, ShieldAlert, Swords, Trophy, Zap, Globe, Users } from "lucide-react";
 import { playMoveSoundFor } from "@/utils/sound";
 
 const DEFAULT_API_BASE_URL = import.meta.env.PROD
@@ -142,6 +142,56 @@ function formatHistoryMove(move) {
   return move.san.includes("e.p.") ? move.san : `${move.san} e.p.`;
 }
 
+function squareFromBoardPosition(rowIndex, colIndex) {
+  return `${String.fromCharCode(97 + colIndex)}${8 - rowIndex}`;
+}
+
+function findKingSquare(game, color) {
+  const board = game.board();
+  for (let rowIndex = 0; rowIndex < board.length; rowIndex += 1) {
+    for (let colIndex = 0; colIndex < board[rowIndex].length; colIndex += 1) {
+      const piece = board[rowIndex][colIndex];
+      if (piece?.type === "k" && piece.color === color) {
+        return squareFromBoardPosition(rowIndex, colIndex);
+      }
+    }
+  }
+  return null;
+}
+
+function getDrawReason(game) {
+  if (game.isStalemate?.()) return "لا توجد نقلة قانونية والملك ليس في كش.";
+  if (game.isInsufficientMaterial?.()) return "لا توجد قطع كافية لفرض كش مات.";
+  if (game.isThreefoldRepetition?.()) return "تكرر نفس الوضع ثلاث مرات.";
+  if (game.isDrawByFiftyMoves?.()) return "مرّت 50 نقلة بدون أسر أو تحريك بيدق.";
+  return "انتهت المباراة بدون فائز حسب قواعد الشطرنج.";
+}
+
+function getGameEndInfo(game, playerColor, isMultiplayer) {
+  if (!game.isGameOver()) return null;
+
+  if (game.isCheckmate()) {
+    const winnerColor = game.turn() === "w" ? "b" : "w";
+    const winnerName = winnerColor === "w" ? "الأبيض" : "الأسود";
+    const playerWon = winnerColor === playerColor;
+    const title = isMultiplayer ? `فاز ${winnerName}` : playerWon ? "فزت بالمباراة" : "خسرت المباراة";
+
+    return {
+      tone: playerWon ? "win" : "loss",
+      title,
+      reason: `السبب: كش مات. ${winnerName} حاصر الملك بدون أي نقلة إنقاذ.`,
+      icon: playerWon ? "trophy" : "alert",
+    };
+  }
+
+  return {
+    tone: "draw",
+    title: "تعادل",
+    reason: `السبب: ${getDrawReason(game)}`,
+    icon: "draw",
+  };
+}
+
 export default function ChessHybridApp() {
   const gameRef = useRef(new Chess());
   const [fen, setFen] = useState(gameRef.current.fen());
@@ -169,6 +219,11 @@ export default function ChessHybridApp() {
   const engineLoadOverlayVisible = engineThinking && engineWaking;
 
   const boardOrientation = playerColor === "w" ? "white" : "black";
+  const checkedKingSquare = useMemo(() => {
+    if (!game.isCheck()) return null;
+    return findKingSquare(game, game.turn());
+  }, [fen, game]);
+  const gameEndInfo = useMemo(() => getGameEndInfo(game, playerColor, isMultiplayer), [fen, playerColor, isMultiplayer, game]);
 
   useEffect(() => {
     void warmupEngineServer();
@@ -205,8 +260,15 @@ export default function ChessHybridApp() {
         background: "rgba(255, 255, 0, 0.4)",
       };
     }
+    if (checkedKingSquare) {
+      styles[checkedKingSquare] = {
+        ...styles[checkedKingSquare],
+        background: "linear-gradient(135deg, rgba(220, 38, 38, 0.9), rgba(127, 29, 29, 0.92))",
+        boxShadow: "inset 0 0 0 4px rgba(254, 202, 202, 0.95), inset 0 0 22px rgba(248, 113, 113, 0.9)",
+      };
+    }
     return styles;
-  }, [lastMoveSquares, moveFrom, optionSquares]);
+  }, [checkedKingSquare, lastMoveSquares, moveFrom, optionSquares]);
 
   function syncGame() {
     setFen(game.fen());
@@ -577,6 +639,13 @@ export default function ChessHybridApp() {
   }
 
   const status = formatStatus(game, engineThinking, playerColor, isMultiplayer, engineWarmupStatus);
+  const activeSideLabel = game.turn() === "w" ? "White" : "Black";
+  const gameModeLabel = isMultiplayer ? "Online" : "Vs AI";
+  const gameEndTheme = gameEndInfo?.tone === "win"
+    ? "border-emerald-400/40 bg-emerald-500/15 text-emerald-100"
+    : gameEndInfo?.tone === "loss"
+      ? "border-red-400/40 bg-red-500/15 text-red-100"
+      : "border-amber-400/40 bg-amber-500/15 text-amber-100";
 
   const movePairs = [];
   for (let i = 0; i < moveHistory.length; i += 2) {
@@ -584,18 +653,36 @@ export default function ChessHybridApp() {
   }
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans">
-      <div className="mx-auto grid max-w-7xl gap-6 p-6 lg:grid-cols-[1.2fr_0.8fr]">
-        <Card className="rounded-3xl border-zinc-800 bg-zinc-900 shadow-2xl p-4">
-          <CardHeader className="flex flex-row items-center justify-between pb-4">
+    <div className="min-h-screen overflow-hidden bg-zinc-950 text-zinc-100 font-sans">
+      <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_top_left,rgba(16,185,129,0.16),transparent_34%),radial-gradient(circle_at_bottom_right,rgba(99,102,241,0.14),transparent_32%)]" />
+      <div className="relative mx-auto grid max-w-7xl gap-4 p-3 sm:gap-6 sm:p-6 lg:grid-cols-[1.2fr_0.8fr]">
+        <Card className="rounded-[2rem] border border-zinc-800/80 bg-zinc-900/90 p-3 shadow-2xl backdrop-blur sm:p-4">
+          <CardHeader className="flex flex-col gap-3 pb-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <CardTitle className="text-2xl font-semibold text-zinc-100">Hybrid Chess Arena</CardTitle>
-              <p className="mt-1 text-sm text-zinc-400">Chess.com-inspired interface with Python Backend.</p>
+              <CardTitle className="text-xl font-semibold text-zinc-100 sm:text-2xl">Hybrid Chess Arena</CardTitle>
+              <p className="mt-1 text-sm text-zinc-400">Mobile-ready chess arena with Python backend.</p>
             </div>
-            <Badge className="rounded-full bg-emerald-500/15 px-3 py-1 text-emerald-300">MVP UI</Badge>
+            <div className="flex flex-wrap gap-2">
+              <Badge className="rounded-full bg-emerald-500/15 px-3 py-1 text-emerald-300">Mobile ready</Badge>
+              {checkedKingSquare && <Badge className="rounded-full bg-red-500/15 px-3 py-1 text-red-200">Check on {checkedKingSquare}</Badge>}
+            </div>
           </CardHeader>
           <CardContent>
-            <div className="rounded-3xl bg-zinc-950 p-4 border border-zinc-800 flex justify-center">
+            <div className="mb-3 grid grid-cols-3 gap-2 sm:hidden">
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-3">
+                <div className="text-[11px] uppercase tracking-wide text-zinc-500">Turn</div>
+                <div className="mt-1 text-sm font-semibold text-zinc-100">{activeSideLabel}</div>
+              </div>
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-3">
+                <div className="text-[11px] uppercase tracking-wide text-zinc-500">Mode</div>
+                <div className="mt-1 text-sm font-semibold text-zinc-100">{gameModeLabel}</div>
+              </div>
+              <div className={`rounded-2xl border p-3 ${checkedKingSquare ? "border-red-500/40 bg-red-500/15" : "border-zinc-800 bg-zinc-950/80"}`}>
+                <div className="text-[11px] uppercase tracking-wide text-zinc-500">King</div>
+                <div className={`mt-1 text-sm font-semibold ${checkedKingSquare ? "text-red-100" : "text-zinc-100"}`}>{checkedKingSquare ? "Check" : "Safe"}</div>
+              </div>
+            </div>
+            <div className="rounded-[1.75rem] border border-zinc-800 bg-zinc-950/90 p-2 shadow-inner sm:p-4 flex justify-center">
               <div className="w-full max-w-[600px] relative">
                 <Chessboard
                   id="HybridBoard"
@@ -612,14 +699,14 @@ export default function ChessHybridApp() {
                   onSquareClick={onSquareClick}
                   boardOrientation={boardOrientation}
                   customSquareStyles={customSquareStyles}
-                  arePiecesDraggable={!engineThinking && !(engineWaking && !playerTurn)}
+                  arePiecesDraggable={!engineThinking && !game.isGameOver() && !(engineWaking && !playerTurn)}
                   customDarkSquareStyle={{ backgroundColor: "#769656" }}
                   customLightSquareStyle={{ backgroundColor: "#eeeed2" }}
-                  customBoardStyle={{ borderRadius: "8px", boxShadow: "0 10px 30px rgba(0,0,0,0.35)" }}
+                  customBoardStyle={{ borderRadius: "18px", boxShadow: "0 18px 45px rgba(0,0,0,0.42)", overflow: "hidden" }}
                 />
 
                 {engineLoadOverlayVisible && (
-                  <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-3 rounded-lg bg-zinc-950/80 text-center backdrop-blur-sm">
+                  <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-3 rounded-[18px] bg-zinc-950/80 text-center backdrop-blur-sm">
                     <Loader2 className="h-9 w-9 animate-spin text-emerald-300" />
                     <div>
                       <div className="text-base font-semibold text-zinc-100">Loading engine model...</div>
@@ -628,8 +715,23 @@ export default function ChessHybridApp() {
                   </div>
                 )}
 
+                {gameEndInfo && (
+                  <div className="absolute inset-0 z-40 flex items-center justify-center rounded-[18px] bg-zinc-950/78 p-4 text-center backdrop-blur-sm">
+                    <div className={`w-full max-w-sm rounded-3xl border p-5 shadow-2xl ${gameEndTheme}`}>
+                      <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-white/10">
+                        {gameEndInfo.icon === "draw" ? <CircleEqual className="h-8 w-8" /> : gameEndInfo.icon === "trophy" ? <Trophy className="h-8 w-8" /> : <ShieldAlert className="h-8 w-8" />}
+                      </div>
+                      <div className="text-2xl font-bold">{gameEndInfo.title}</div>
+                      <div className="mt-2 text-sm leading-6 opacity-90">{gameEndInfo.reason}</div>
+                      <Button className="mt-5 w-full rounded-2xl bg-zinc-50 px-4 py-3 font-semibold text-zinc-950 hover:bg-white" onClick={() => newGame(playerColor)}>
+                        Play again
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
                 {showPromotionDialog && (
-                  <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/50 rounded-lg">
+                  <div className="absolute inset-0 z-50 flex items-center justify-center rounded-[18px] bg-black/50">
                     <div className="bg-zinc-800 p-4 rounded-xl flex gap-2 shadow-2xl border border-zinc-700">
                       {["q", "r", "n", "b"].map((piece) => (
                         <button
@@ -652,16 +754,29 @@ export default function ChessHybridApp() {
           </CardContent>
         </Card>
 
-        <div className="grid gap-6">
-          <Card className="rounded-3xl border-zinc-800 bg-zinc-900 p-4">
+        <div className="grid gap-4 sm:gap-6">
+          <Card className="rounded-[2rem] border border-zinc-800/80 bg-zinc-900/90 p-3 shadow-xl backdrop-blur sm:p-4">
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-lg text-zinc-100"><Brain className="h-5 w-5" /> Game Status</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="flex items-center gap-2 rounded-2xl border border-zinc-800 bg-zinc-950 py-3 px-4 text-sm font-medium text-zinc-300">
+              <div className="flex items-center gap-2 rounded-2xl border border-zinc-800 bg-zinc-950/90 px-4 py-3 text-sm font-medium text-zinc-300">
                 {engineWaking && <Loader2 className="h-4 w-4 animate-spin text-emerald-300" />}
                 <span>{status}</span>
               </div>
+              {gameEndInfo && (
+                <div className={`rounded-3xl border p-4 ${gameEndTheme}`}>
+                  <div className="flex items-start gap-3">
+                    <div className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-white/10">
+                      {gameEndInfo.icon === "draw" ? <CircleEqual className="h-5 w-5" /> : gameEndInfo.icon === "trophy" ? <Trophy className="h-5 w-5" /> : <ShieldAlert className="h-5 w-5" />}
+                    </div>
+                    <div>
+                      <div className="font-bold">{gameEndInfo.title}</div>
+                      <div className="mt-1 text-sm leading-6 opacity-90">{gameEndInfo.reason}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
               {lastMoveNote && (
                 <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm font-medium text-red-200">
                   {lastMoveNote}
@@ -697,19 +812,19 @@ export default function ChessHybridApp() {
                   </Select>
                 </div>
               </div>
-              <div className="flex gap-3 pt-2">
+              <div className="flex flex-col gap-3 pt-2 sm:flex-row">
                 <Button className="flex-1 rounded-xl bg-zinc-100 text-zinc-900 hover:bg-zinc-200 py-2.5 flex justify-center items-center font-medium disabled:cursor-not-allowed disabled:opacity-60" disabled={engineThinking} onClick={() => {
                   setIsMultiplayer(false);
                   newGame(playerColor);
                 }}>
                   <RotateCcw className="mr-2 h-4 w-4" /> New AI Game
                 </Button>
-                <Button className="flex-1 rounded-xl bg-zinc-800 text-zinc-100 hover:bg-zinc-700 py-2.5 flex justify-center items-center font-medium" onClick={maybePlayEngine} disabled={engineThinking || isMultiplayer || engineWaking}>
+                <Button className="flex-1 rounded-xl bg-zinc-800 text-zinc-100 hover:bg-zinc-700 py-2.5 flex justify-center items-center font-medium disabled:cursor-not-allowed disabled:opacity-60" onClick={maybePlayEngine} disabled={engineThinking || isMultiplayer || engineWaking || game.isGameOver()}>
                   <Zap className="mr-2 h-4 w-4" /> AI Move
                 </Button>
               </div>
 
-              <div className="flex gap-3 pt-2 border-t border-zinc-800">
+              <div className="flex flex-col gap-3 border-t border-zinc-800 pt-2 sm:flex-row">
                 {!isMultiplayer ? (
                   <>
                     <Button className="flex-1 rounded-xl bg-emerald-600 text-white hover:bg-emerald-500 py-2.5 disabled:cursor-not-allowed disabled:opacity-60" disabled={engineThinking} onClick={startMultiplayer}>
@@ -720,7 +835,7 @@ export default function ChessHybridApp() {
                     </Button>
                   </>
                 ) : (
-                  <div className="flex items-center gap-3 w-full justify-between py-1 border border-zinc-700 bg-zinc-800/50 rounded-xl px-4">
+                  <div className="flex w-full items-center justify-between gap-3 rounded-xl border border-zinc-700 bg-zinc-800/50 px-4 py-2">
                     <span className="text-zinc-300 font-medium">Room: <span className="text-white font-mono">{roomId}</span></span>
                     <Button variant="outline" size="sm" className="h-7 bg-zinc-900 text-xs border-zinc-600" onClick={() => setIsMultiplayer(false)}>Quit</Button>
                   </div>
@@ -729,12 +844,12 @@ export default function ChessHybridApp() {
             </CardContent>
           </Card>
 
-          <Card className="rounded-3xl border-zinc-800 bg-zinc-900 p-4">
+          <Card className="rounded-[2rem] border border-zinc-800/80 bg-zinc-900/90 p-3 shadow-xl backdrop-blur sm:p-4">
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-lg text-zinc-100"><Swords className="h-5 w-5" /> Move List</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="max-h-[220px] overflow-auto rounded-2xl border border-zinc-800 bg-zinc-950 custom-scrollbar">
+              <div className="max-h-[220px] overflow-auto rounded-2xl border border-zinc-800 bg-zinc-950/90 custom-scrollbar">
                 <div className="grid grid-cols-[50px_1fr_1fr] gap-x-3 border-b border-zinc-800 px-4 py-2.5 text-xs uppercase tracking-wider text-zinc-500 font-medium sticky top-0 bg-zinc-950/95 backdrop-blur">
                   <div>#</div>
                   <div>White</div>
@@ -757,7 +872,7 @@ export default function ChessHybridApp() {
             </CardContent>
           </Card>
 
-          <Card className="rounded-3xl border-zinc-800 bg-zinc-900 p-4">
+          <Card className="rounded-[2rem] border border-zinc-800/80 bg-zinc-900/90 p-3 shadow-xl backdrop-blur sm:p-4">
             <CardHeader className="pb-3">
               <CardTitle className="text-lg text-zinc-100">Captured Pieces</CardTitle>
             </CardHeader>
