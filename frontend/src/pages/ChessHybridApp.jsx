@@ -160,11 +160,11 @@ function findKingSquare(game, color) {
 }
 
 function getDrawReason(game) {
-  if (game.isStalemate?.()) return "لا توجد نقلة قانونية والملك ليس في كش.";
-  if (game.isInsufficientMaterial?.()) return "لا توجد قطع كافية لفرض كش مات.";
-  if (game.isThreefoldRepetition?.()) return "تكرر نفس الوضع ثلاث مرات.";
-  if (game.isDrawByFiftyMoves?.()) return "مرّت 50 نقلة بدون أسر أو تحريك بيدق.";
-  return "انتهت المباراة بدون فائز حسب قواعد الشطرنج.";
+  if (game.isStalemate?.()) return "Stalemate: the player to move has no legal move and is not in check.";
+  if (game.isInsufficientMaterial?.()) return "Insufficient material: neither side has enough pieces to force checkmate.";
+  if (game.isThreefoldRepetition?.()) return "Threefold repetition: the same position occurred three times.";
+  if (game.isDrawByFiftyMoves?.()) return "Fifty-move rule: 50 moves passed without a pawn move or capture.";
+  return "The game ended in a draw under chess rules.";
 }
 
 function getGameEndInfo(game, playerColor, isMultiplayer) {
@@ -172,22 +172,22 @@ function getGameEndInfo(game, playerColor, isMultiplayer) {
 
   if (game.isCheckmate()) {
     const winnerColor = game.turn() === "w" ? "b" : "w";
-    const winnerName = winnerColor === "w" ? "الأبيض" : "الأسود";
+    const winnerName = winnerColor === "w" ? "White" : "Black";
     const playerWon = winnerColor === playerColor;
-    const title = isMultiplayer ? `فاز ${winnerName}` : playerWon ? "فزت بالمباراة" : "خسرت المباراة";
+    const title = isMultiplayer ? `${winnerName} wins` : playerWon ? "You won" : "You lost";
 
     return {
       tone: playerWon ? "win" : "loss",
       title,
-      reason: `السبب: كش مات. ${winnerName} حاصر الملك بدون أي نقلة إنقاذ.`,
+      reason: `Reason: checkmate. ${winnerName} trapped the king with no legal escape.`,
       icon: playerWon ? "trophy" : "alert",
     };
   }
 
   return {
     tone: "draw",
-    title: "تعادل",
-    reason: `السبب: ${getDrawReason(game)}`,
+    title: "Draw",
+    reason: `Reason: ${getDrawReason(game)}`,
     icon: "draw",
   };
 }
