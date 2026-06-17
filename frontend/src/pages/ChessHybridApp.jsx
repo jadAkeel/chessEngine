@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useState, useEffect } from "react";
 import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
+import { HTML5Backend } from "react-dnd-html5-backend";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -224,6 +225,7 @@ export default function ChessHybridApp() {
     return findKingSquare(game, game.turn());
   }, [fen, game]);
   const gameEndInfo = useMemo(() => getGameEndInfo(game, playerColor, isMultiplayer), [fen, playerColor, isMultiplayer, game]);
+  const useMouseDndBackend = typeof window !== "undefined" && window.matchMedia?.("(pointer: fine)").matches;
 
   useEffect(() => {
     void warmupEngineServer();
@@ -687,6 +689,7 @@ export default function ChessHybridApp() {
               <div className="w-full max-w-[600px] relative">
                 <Chessboard
                   id="HybridBoard"
+                  customDndBackend={useMouseDndBackend ? HTML5Backend : undefined}
                   position={fen}
                   onPieceDrop={onDrop}
                   onPieceDragBegin={(piece, square) => {
