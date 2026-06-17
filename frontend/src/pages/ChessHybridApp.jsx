@@ -204,7 +204,6 @@ export default function ChessHybridApp() {
   const [lastMoveNote, setLastMoveNote] = useState("");
   const [moveFrom, setMoveFrom] = useState("");
   const [optionSquares, setOptionSquares] = useState({});
-  const [boardWidth, setBoardWidth] = useState(560);
 
   const [isMultiplayer, setIsMultiplayer] = useState(false);
   const [roomId, setRoomId] = useState("");
@@ -212,7 +211,6 @@ export default function ChessHybridApp() {
   const [showPromotionDialog, setShowPromotionDialog] = useState(false);
   const [promotionMoveDetail, setPromotionMoveDetail] = useState(null);
 
-  const boardWrapRef = useRef(null);
   const wsRef = useRef(null);
   const engineWarmupPromiseRef = useRef(null);
   const game = gameRef.current;
@@ -229,27 +227,6 @@ export default function ChessHybridApp() {
 
   useEffect(() => {
     void warmupEngineServer();
-  }, []);
-
-  useEffect(() => {
-    const element = boardWrapRef.current;
-    if (!element) return undefined;
-
-    const updateBoardWidth = () => {
-      const nextWidth = Math.floor(element.getBoundingClientRect().width);
-      if (nextWidth > 0) setBoardWidth(Math.min(nextWidth, 600));
-    };
-
-    updateBoardWidth();
-
-    if (typeof ResizeObserver === "undefined") {
-      window.addEventListener("resize", updateBoardWidth);
-      return () => window.removeEventListener("resize", updateBoardWidth);
-    }
-
-    const observer = new ResizeObserver(updateBoardWidth);
-    observer.observe(element);
-    return () => observer.disconnect();
   }, []);
 
   useEffect(() => {
@@ -479,7 +456,7 @@ export default function ChessHybridApp() {
     setOptionSquares(options);
   }
 
-  function onDrop(sourceSquare, targetSquare, piece) {
+  function onDrop(sourceSquare, targetSquare) {
     if (isMultiplayer) {
       if (game.turn() !== playerColor) return false;
     } else {
@@ -496,10 +473,11 @@ export default function ChessHybridApp() {
       if (sourceSquare === 'e8' && targetSquare === 'a8') adjustedTarget = 'c8';
     }
 
-    const isPawnMove = piece?.toLowerCase().includes("p");
-    const isPromotionRank = adjustedTarget[1] === "8" || adjustedTarget[1] === "1";
-    
-    if (isPawnMove && isPromotionRank) {
+    const validPromotionMove = game
+      .moves({ square: sourceSquare, verbose: true })
+      .some((move) => move.to === adjustedTarget && move.promotion);
+
+    if (validPromotionMove) {
       setPromotionMoveDetail({ from: sourceSquare, to: adjustedTarget });
       setShowPromotionDialog(true);
       return true;
@@ -705,11 +683,10 @@ export default function ChessHybridApp() {
                 <div className={`mt-1 text-sm font-semibold ${checkedKingSquare ? "text-red-100" : "text-zinc-100"}`}>{checkedKingSquare ? "Check" : "Safe"}</div>
               </div>
             </div>
-            <div className="rounded-[1.75rem] border border-zinc-800 bg-zinc-950/90 p-2 shadow-inner sm:p-4 flex justify-center">
-              <div ref={boardWrapRef} className="w-full max-w-[600px] relative">
+            <div className="rounded-3xl border border-zinc-800 bg-zinc-950 p-4 flex justify-center">
+              <div className="w-full max-w-[600px] relative">
                 <Chessboard
                   id="HybridBoard"
-                  boardWidth={boardWidth}
                   position={fen}
                   onPieceDrop={onDrop}
                   onPieceDragBegin={(piece, square) => {
@@ -726,7 +703,7 @@ export default function ChessHybridApp() {
                   arePiecesDraggable={!engineThinking && !game.isGameOver() && !(engineWaking && !playerTurn)}
                   customDarkSquareStyle={{ backgroundColor: "#769656" }}
                   customLightSquareStyle={{ backgroundColor: "#eeeed2" }}
-                  customBoardStyle={{ borderRadius: "18px", boxShadow: "0 18px 45px rgba(0,0,0,0.42)", overflow: "hidden" }}
+                  customBoardStyle={{ borderRadius: "8px", boxShadow: "0 10px 30px rgba(0,0,0,0.35)" }}
                 />
 
                 {engineLoadOverlayVisible && (
