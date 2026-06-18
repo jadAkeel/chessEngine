@@ -112,7 +112,7 @@ class PrinciplePenaltiesConfig:
 
 @dataclass(frozen=True)
 class MCTSConfig:
-    num_simulations: int = 64
+    num_simulations: int = 256
     c_puct: float = 1.8
     dirichlet_alpha: float = 0.25
     dirichlet_eps: float = 0.25

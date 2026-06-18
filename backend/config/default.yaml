@@ -57,7 +57,7 @@ principle_penalties:
 
 
 mcts:
-  num_simulations: 64
+  num_simulations: 256
   c_puct: 1.8
   dirichlet_alpha: 0.25
   dirichlet_eps: 0.25
