@@ -86,4 +86,11 @@ The frontend expects the backend to be running locally.
 
 - If no checkpoint exists, the backend starts with random weights.
 - The network output size is `4672` (`8 * 8 * 73`).
+- With `backend/config/default.yaml`, the policy-value network uses 20 input
+  planes, 160 trunk channels, 24 residual blocks, and exactly 11,757,287
+  trainable parameters (about 11.8 million).
+- The external-training configuration caps ingestion at 75,000,000 samples.
+  The loader supports sharded, streaming ingestion up to that configured cap;
+  this is a capacity limit, not a claim that a complete 75-million-sample run
+  has finished.
 - Training and gameplay are now internally consistent, but engine strength still depends on real training data and checkpoints.
