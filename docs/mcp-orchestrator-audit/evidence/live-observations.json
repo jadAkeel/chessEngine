@@ -1,0 +1,43 @@
+{
+  "date": "2026-09-05",
+  "type": "Curated observations, not raw provider transcripts",
+  "source": "MCP calls in this study",
+  "health": {
+    "status": "healthy",
+    "opencodeVersion": "1.17.13",
+    "gitVersion": "2.39.1.windows.1",
+    "agent": "mcp-orchestrator",
+    "configuredModel": "openai/gpt-5.6-terra",
+    "variant": "high",
+    "plugins": "disabled --pure",
+    "providerConcurrencyLimit": 2,
+    "contractorCapabilityConfigured": false
+  },
+  "nonGit": {
+    "cwd": "C:/Users/10User/codex-opencode-mcp-releases/server-3e828b6c-20260813-lock-origin",
+    "preflight": "Delegation plan accepted.",
+    "execution": "git_state_required",
+    "executionDurationMs": 75,
+    "providerWasNotRun": true
+  },
+  "permissions": {
+    "general": "read_only_agent_required",
+    "plan": "agent_permissions_unsafe"
+  },
+  "independentReview": {
+    "cwd": "C:/Users/10User/codex-opencode-mcp",
+    "summary": "not available"
+  },
+  "diagnosticsAfterIndependentReview": {
+    "jobs": 0,
+    "failedJobs": 0,
+    "pipelines": 0,
+    "providerActiveLeases": 0,
+    "conclusion": "Direct execution did not produce a queued-job history entry."
+  },
+  "historicalOnly": {
+    "durationMs": 206736,
+    "status": "From earlier conversation summary; original terminal transcript not recovered in this study. Not a benchmark."
+  }
+}
+

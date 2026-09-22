@@ -1,0 +1,225 @@
+{
+  "checkpoint_sha256": "36564b9ad7e3f6e8371985c6254717527c07fee49ce1e48a80d762071936599d",
+  "torch": "2.10.0+cpu",
+  "device": "cpu",
+  "threads": 8,
+  "simulations": 256,
+  "time_limit": 2.0,
+  "results": [
+    {
+      "variant": "default",
+      "position": "opening",
+      "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+      "seconds": 1.7856,
+      "move": "d2d4",
+      "score": 0.011599274000968775,
+      "visits": 146,
+      "max_evaluated_depth": 3,
+      "mean_evaluated_depth": 1.9523809523809523,
+      "top_visits": [
+        [
+          "g2g3",
+          13
+        ],
+        [
+          "d2d4",
+          13
+        ],
+        [
+          "e2e3",
+          11
+        ],
+        [
+          "g1f3",
+          10
+        ],
+        [
+          "d2d3",
+          8
+        ]
+      ]
+    },
+    {
+      "variant": "default",
+      "position": "reported_mate_two",
+      "fen": "8/5pk1/3p1n2/3Br3/5Qp1/6K1/8/7R b - - 5 36",
+      "seconds": 1.802,
+      "move": "e5h5",
+      "score": -0.7970009233281273,
+      "visits": 101,
+      "max_evaluated_depth": 5,
+      "mean_evaluated_depth": 2.2658227848101267,
+      "top_visits": [
+        [
+          "e5d5",
+          13
+        ],
+        [
+          "f6d5",
+          11
+        ],
+        [
+          "f6h7",
+          6
+        ],
+        [
+          "f6d7",
+          6
+        ],
+        [
+          "g7g6",
+          5
+        ]
+      ]
+    },
+    {
+      "variant": "default",
+      "position": "free_queen",
+      "fen": "4k3/8/8/8/3q4/8/3R4/4K3 w - - 0 1",
+      "seconds": 1.823,
+      "move": "d2d4",
+      "score": -0.30652454966292,
+      "visits": 168,
+      "max_evaluated_depth": 6,
+      "mean_evaluated_depth": 2.8536585365853657,
+      "top_visits": [
+        [
+          "d2d4",
+          28
+        ],
+        [
+          "d2e2",
+          16
+        ],
+        [
+          "d2c2",
+          15
+        ],
+        [
+          "e1e2",
+          15
+        ],
+        [
+          "d2h2",
+          14
+        ]
+      ]
+    },
+    {
+      "variant": "default",
+      "position": "mate_one",
+      "fen": "rnbqkbnr/pppp1ppp/8/4p3/6P1/5P2/PPPPP2P/RNBQKBNR b KQkq - 0 2",
+      "seconds": 0.0013,
+      "move": "d8h4",
+      "score": 1.0,
+      "visits": 1,
+      "max_evaluated_depth": 0,
+      "mean_evaluated_depth": 0.0,
+      "top_visits": [
+        [
+          "d8h4",
+          1
+        ]
+      ]
+    },
+    {
+      "variant": "default",
+      "position": "live_13",
+      "fen": "r1b2rk1/pp2nppp/4p3/3pP3/1q6/1P1B1Q2/P2N1PPP/R3K2R w KQ - 3 13",
+      "seconds": 1.9337,
+      "move": "a1c1",
+      "score": -0.4029284638644711,
+      "visits": 65,
+      "max_evaluated_depth": 3,
+      "mean_evaluated_depth": 1.606060606060606,
+      "top_visits": [
+        [
+          "e1g1",
+          6
+        ],
+        [
+          "f3h5",
+          3
+        ],
+        [
+          "f3h3",
+          3
+        ],
+        [
+          "f3e3",
+          3
+        ],
+        [
+          "f3e2",
+          3
+        ]
+      ]
+    },
+    {
+      "variant": "default",
+      "position": "live_19",
+      "fen": "r1b2rk1/pp3ppp/3q2n1/3pp3/P7/1P1BR2Q/5PPP/R5K1 w - - 0 19",
+      "seconds": 1.886,
+      "move": "h3f3",
+      "score": -0.8327730960292059,
+      "visits": 55,
+      "max_evaluated_depth": 3,
+      "mean_evaluated_depth": 1.3571428571428572,
+      "top_visits": [
+        [
+          "h3h5",
+          3
+        ],
+        [
+          "h3g3",
+          3
+        ],
+        [
+          "h3f3",
+          3
+        ],
+        [
+          "d3g6",
+          3
+        ],
+        [
+          "d3f5",
+          3
+        ]
+      ]
+    },
+    {
+      "variant": "default",
+      "position": "live_25",
+      "fen": "5rk1/pp3ppp/6q1/3p4/P3pn2/1PR5/5PPP/1B2R1K1 w - - 1 25",
+      "seconds": 1.7641,
+      "move": "g2g3",
+      "score": -0.9054806624077837,
+      "visits": 72,
+      "max_evaluated_depth": 3,
+      "mean_evaluated_depth": 1.2790697674418605,
+      "top_visits": [
+        [
+          "c3c7",
+          7
+        ],
+        [
+          "g2g3",
+          6
+        ],
+        [
+          "c3g3",
+          4
+        ],
+        [
+          "c3e3",
+          4
+        ],
+        [
+          "g1f1",
+          4
+        ]
+      ]
+    }
+  ]
+}

@@ -1,0 +1,274 @@
+{
+  "checkpoint_sha256": "36564b9ad7e3f6e8371985c6254717527c07fee49ce1e48a80d762071936599d",
+  "torch": "2.10.0+cpu",
+  "device": "cpu",
+  "threads": 8,
+  "simulations": 128,
+  "time_limit": null,
+  "results": [
+    {
+      "variant": "default",
+      "position": "opening",
+      "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+      "seconds": 3.0964,
+      "move": "d2d4",
+      "score": 0.01396312511780219,
+      "visits": 128,
+      "max_evaluated_depth": 3,
+      "mean_evaluated_depth": 1.875968992248062,
+      "top_visits": [
+        [
+          "g2g3",
+          11
+        ],
+        [
+          "e2e3",
+          11
+        ],
+        [
+          "d2d4",
+          11
+        ],
+        [
+          "g1f3",
+          10
+        ],
+        [
+          "d2d3",
+          7
+        ]
+      ]
+    },
+    {
+      "variant": "default",
+      "position": "reported_mate_two",
+      "fen": "8/5pk1/3p1n2/3Br3/5Qp1/6K1/8/7R b - - 5 36",
+      "seconds": 4.6151,
+      "move": "e5d5",
+      "score": -0.7984456009098502,
+      "visits": 128,
+      "max_evaluated_depth": 6,
+      "mean_evaluated_depth": 2.5543478260869565,
+      "top_visits": [
+        [
+          "e5d5",
+          16
+        ],
+        [
+          "f6d5",
+          13
+        ],
+        [
+          "f6d7",
+          10
+        ],
+        [
+          "f6h7",
+          9
+        ],
+        [
+          "e5e4",
+          7
+        ]
+      ]
+    },
+    {
+      "variant": "default",
+      "position": "free_queen",
+      "fen": "4k3/8/8/8/3q4/8/3R4/4K3 w - - 0 1",
+      "seconds": 2.2116,
+      "move": "d2d4",
+      "score": -0.27479598261778,
+      "visits": 128,
+      "max_evaluated_depth": 5,
+      "mean_evaluated_depth": 2.576,
+      "top_visits": [
+        [
+          "d2d4",
+          23
+        ],
+        [
+          "d2e2",
+          12
+        ],
+        [
+          "d2c2",
+          12
+        ],
+        [
+          "d2g2",
+          11
+        ],
+        [
+          "d2f2",
+          11
+        ]
+      ]
+    },
+    {
+      "variant": "default",
+      "position": "mate_one",
+      "fen": "rnbqkbnr/pppp1ppp/8/4p3/6P1/5P2/PPPPP2P/RNBQKBNR b KQkq - 0 2",
+      "seconds": 1.7247,
+      "move": "d8h4",
+      "score": 0.925683416896136,
+      "visits": 128,
+      "max_evaluated_depth": 2,
+      "mean_evaluated_depth": 1.4166666666666667,
+      "top_visits": [
+        [
+          "d8h4",
+          117
+        ],
+        [
+          "g8f6",
+          3
+        ],
+        [
+          "d7d5",
+          3
+        ],
+        [
+          "f8c5",
+          2
+        ],
+        [
+          "d7d6",
+          2
+        ]
+      ]
+    },
+    {
+      "variant": "no_principles",
+      "position": "opening",
+      "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+      "seconds": 1.8728,
+      "move": "e2e3",
+      "score": 0.013314003575180066,
+      "visits": 128,
+      "max_evaluated_depth": 3,
+      "mean_evaluated_depth": 1.8837209302325582,
+      "top_visits": [
+        [
+          "g2g3",
+          11
+        ],
+        [
+          "e2e3",
+          11
+        ],
+        [
+          "d2d4",
+          11
+        ],
+        [
+          "g1f3",
+          9
+        ],
+        [
+          "d2d3",
+          7
+        ]
+      ]
+    },
+    {
+      "variant": "no_principles",
+      "position": "reported_mate_two",
+      "fen": "8/5pk1/3p1n2/3Br3/5Qp1/6K1/8/7R b - - 5 36",
+      "seconds": 2.2742,
+      "move": "e5d5",
+      "score": -0.80246927413803,
+      "visits": 128,
+      "max_evaluated_depth": 6,
+      "mean_evaluated_depth": 2.50561797752809,
+      "top_visits": [
+        [
+          "e5d5",
+          16
+        ],
+        [
+          "f6d5",
+          12
+        ],
+        [
+          "f6g8",
+          11
+        ],
+        [
+          "f6e8",
+          11
+        ],
+        [
+          "f6d7",
+          10
+        ]
+      ]
+    },
+    {
+      "variant": "no_principles",
+      "position": "free_queen",
+      "fen": "4k3/8/8/8/3q4/8/3R4/4K3 w - - 0 1",
+      "seconds": 2.3969,
+      "move": "d2d4",
+      "score": -0.28439570756803356,
+      "visits": 128,
+      "max_evaluated_depth": 5,
+      "mean_evaluated_depth": 2.616,
+      "top_visits": [
+        [
+          "d2d4",
+          23
+        ],
+        [
+          "e1e2",
+          13
+        ],
+        [
+          "d2e2",
+          12
+        ],
+        [
+          "d2c2",
+          11
+        ],
+        [
+          "d2g2",
+          10
+        ]
+      ]
+    },
+    {
+      "variant": "no_principles",
+      "position": "mate_one",
+      "fen": "rnbqkbnr/pppp1ppp/8/4p3/6P1/5P2/PPPPP2P/RNBQKBNR b KQkq - 0 2",
+      "seconds": 0.761,
+      "move": "d8h4",
+      "score": 0.9188537459130498,
+      "visits": 128,
+      "max_evaluated_depth": 2,
+      "mean_evaluated_depth": 1.3846153846153846,
+      "top_visits": [
+        [
+          "d8h4",
+          116
+        ],
+        [
+          "g8f6",
+          3
+        ],
+        [
+          "d7d5",
+          3
+        ],
+        [
+          "f8c5",
+          2
+        ],
+        [
+          "d7d6",
+          2
+        ]
+      ]
+    }
+  ]
+}

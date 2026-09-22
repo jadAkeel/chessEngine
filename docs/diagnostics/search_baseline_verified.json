@@ -1,0 +1,255 @@
+{
+  "checkpoint_sha256": "36564b9ad7e3f6e8371985c6254717527c07fee49ce1e48a80d762071936599d",
+  "torch": "2.10.0+cpu",
+  "device": "cpu",
+  "threads": 8,
+  "simulations": 128,
+  "time_limit": null,
+  "results": [
+    {
+      "variant": "default",
+      "position": "opening",
+      "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+      "seconds": 3.3015,
+      "move": "d2d4",
+      "score": 0.01396312511780219,
+      "visits": 128,
+      "max_evaluated_depth": 3,
+      "mean_evaluated_depth": 1.875968992248062,
+      "top_visits": [
+        [
+          "g2g3",
+          11
+        ],
+        [
+          "e2e3",
+          11
+        ],
+        [
+          "d2d4",
+          11
+        ],
+        [
+          "g1f3",
+          10
+        ],
+        [
+          "d2d3",
+          7
+        ]
+      ],
+      "allows_short_mate": false,
+      "allows_valuable_capture": false
+    },
+    {
+      "variant": "default",
+      "position": "reported_mate_two",
+      "fen": "8/5pk1/3p1n2/3Br3/5Qp1/6K1/8/7R b - - 5 36",
+      "seconds": 4.728,
+      "move": "e5d5",
+      "score": -0.7984456009098502,
+      "visits": 128,
+      "max_evaluated_depth": 6,
+      "mean_evaluated_depth": 2.5543478260869565,
+      "top_visits": [
+        [
+          "e5d5",
+          16
+        ],
+        [
+          "f6d5",
+          13
+        ],
+        [
+          "f6d7",
+          10
+        ],
+        [
+          "f6h7",
+          9
+        ],
+        [
+          "e5e4",
+          7
+        ]
+      ],
+      "allows_short_mate": true,
+      "allows_valuable_capture": false
+    },
+    {
+      "variant": "default",
+      "position": "free_queen",
+      "fen": "4k3/8/8/8/3q4/8/3R4/4K3 w - - 0 1",
+      "seconds": 2.7244,
+      "move": "d2d4",
+      "score": -0.27479598261778,
+      "visits": 128,
+      "max_evaluated_depth": 5,
+      "mean_evaluated_depth": 2.576,
+      "top_visits": [
+        [
+          "d2d4",
+          23
+        ],
+        [
+          "d2e2",
+          12
+        ],
+        [
+          "d2c2",
+          12
+        ],
+        [
+          "d2g2",
+          11
+        ],
+        [
+          "d2f2",
+          11
+        ]
+      ],
+      "allows_short_mate": false,
+      "allows_valuable_capture": false
+    },
+    {
+      "variant": "default",
+      "position": "mate_one",
+      "fen": "rnbqkbnr/pppp1ppp/8/4p3/6P1/5P2/PPPPP2P/RNBQKBNR b KQkq - 0 2",
+      "seconds": 1.9726,
+      "move": "d8h4",
+      "score": 0.925683416896136,
+      "visits": 128,
+      "max_evaluated_depth": 2,
+      "mean_evaluated_depth": 1.4166666666666667,
+      "top_visits": [
+        [
+          "d8h4",
+          117
+        ],
+        [
+          "g8f6",
+          3
+        ],
+        [
+          "d7d5",
+          3
+        ],
+        [
+          "f8c5",
+          2
+        ],
+        [
+          "d7d6",
+          2
+        ]
+      ],
+      "allows_short_mate": false,
+      "allows_valuable_capture": false
+    },
+    {
+      "variant": "default",
+      "position": "live_13",
+      "fen": "r1b2rk1/pp2nppp/4p3/3pP3/1q6/1P1B1Q2/P2N1PPP/R3K2R w KQ - 3 13",
+      "seconds": 7.9085,
+      "move": "e1g1",
+      "score": -0.3961047938203517,
+      "visits": 128,
+      "max_evaluated_depth": 5,
+      "mean_evaluated_depth": 2.2170542635658914,
+      "top_visits": [
+        [
+          "e1g1",
+          11
+        ],
+        [
+          "f3h5",
+          6
+        ],
+        [
+          "f3e3",
+          6
+        ],
+        [
+          "f3e2",
+          6
+        ],
+        [
+          "a1c1",
+          6
+        ]
+      ],
+      "allows_short_mate": false,
+      "allows_valuable_capture": true
+    },
+    {
+      "variant": "default",
+      "position": "live_19",
+      "fen": "r1b2rk1/pp3ppp/3q2n1/3pp3/P7/1P1BR2Q/5PPP/R5K1 w - - 0 19",
+      "seconds": 8.1811,
+      "move": "a1e1",
+      "score": -0.8535084226454435,
+      "visits": 128,
+      "max_evaluated_depth": 5,
+      "mean_evaluated_depth": 2.201550387596899,
+      "top_visits": [
+        [
+          "h3h5",
+          6
+        ],
+        [
+          "h3g3",
+          6
+        ],
+        [
+          "h3f3",
+          6
+        ],
+        [
+          "e3g3",
+          6
+        ],
+        [
+          "d3g6",
+          6
+        ]
+      ],
+      "allows_short_mate": false,
+      "allows_valuable_capture": true
+    },
+    {
+      "variant": "default",
+      "position": "live_25",
+      "fen": "5rk1/pp3ppp/6q1/3p4/P3pn2/1PR5/5PPP/1B2R1K1 w - - 1 25",
+      "seconds": 4.7354,
+      "move": "c3c7",
+      "score": -0.9281302121607973,
+      "visits": 128,
+      "max_evaluated_depth": 5,
+      "mean_evaluated_depth": 1.7037037037037037,
+      "top_visits": [
+        [
+          "c3c7",
+          22
+        ],
+        [
+          "c3e3",
+          12
+        ],
+        [
+          "g1f1",
+          12
+        ],
+        [
+          "g2g3",
+          12
+        ],
+        [
+          "c3g3",
+          7
+        ]
+      ],
+      "allows_short_mate": true,
+      "allows_valuable_capture": false
+    }
+  ]
+}

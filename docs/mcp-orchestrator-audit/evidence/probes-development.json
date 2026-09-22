@@ -1,0 +1,33 @@
+{
+  "generatedAt": "2026-09-05T14:52:41.468Z",
+  "sourcePath": "C:\\Users\\10User\\codex-opencode-mcp\\server.js",
+  "sourceSha256": "9b6b3fce153c6d145aa3cf400c3b59f2f33969e01ea9d82501170a12ac7d17ce",
+  "sourceLocations": {
+    "redactSensitiveText": 784,
+    "retryAfterMsFromText": 1693,
+    "providerErrorTypeFromText": 3245,
+    "providerErrorTypeFromDiagnosticLine": 3280,
+    "providerErrorTypeFromStructuredEvent": 3289,
+    "modelEvidenceFromEvent": 3326,
+    "providerDiagnosticTextFromStderr": 3342,
+    "inspectOpenCodeEventStream": 3352,
+    "isTimeoutResult": 4367,
+    "classifyResultError": 4371,
+    "immutableReleasePluginModeError": 23182
+  },
+  "positiveControlsPassed": 5,
+  "observations": {
+    "bareGithubClassicCredentialRedacted": false,
+    "bareGithubFineGrainedCredentialRedacted": false,
+    "laterAuthoritativeModelObserved": false,
+    "observedModelForMixedStream": "model-a",
+    "missingRuntimeModel": true,
+    "missingRuntimeModelClassification": null,
+    "malformedLineCount": 1,
+    "malformedStreamClassification": null,
+    "multipartRetainsFirstSection": false,
+    "pinnedReleaseWithExternalPluginError": "Immutable releases must use pure mode and built-in authentication; external OAuth plugins share XDG_CONFIG_HOME with credential storage and are not supported."
+  },
+  "limitation": "Pure-function probes only. No provider, CLI transport, real secret, or runtime model switch was exercised. Null classification means no error from classifyResultError; runOpenCode adds a mismatch check only when model evidence is present."
+}
+

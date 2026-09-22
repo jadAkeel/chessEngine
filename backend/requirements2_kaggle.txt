@@ -1,0 +1,11 @@
+# Training requirements for Kaggle/Colab GPU notebooks.
+# PyTorch is intentionally not listed here: Kaggle/Colab provide a CUDA-enabled
+# torch build when the notebook accelerator is set to GPU. Installing torch here
+# can replace it with a CPU-only wheel.
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+python-chess>=1.999
+numpy>=1.26.0
+PyYAML>=6.0.1
+zstandard>=0.23.0
+kaggle>=1.6.17
