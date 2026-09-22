@@ -1,0 +1,74 @@
+[
+  {
+    "game": 1,
+    "white": "after",
+    "black": "before",
+    "result": "1-0",
+    "termination": "CHECKMATE",
+    "plies": 51,
+    "seconds": {
+      "before": 35.400867099993775,
+      "after": 25.14836640000067
+    }
+  },
+  {
+    "game": 2,
+    "white": "before",
+    "black": "after",
+    "result": "0-1",
+    "termination": "CHECKMATE",
+    "plies": 130,
+    "seconds": {
+      "before": 102.9566519,
+      "after": 70.18790350001655
+    }
+  },
+  {
+    "game": 3,
+    "white": "after",
+    "black": "before",
+    "result": "1/2-1/2",
+    "termination": "INSUFFICIENT_MATERIAL",
+    "plies": 98,
+    "seconds": {
+      "before": 76.98490329999913,
+      "after": 53.14263759999085
+    }
+  },
+  {
+    "game": 4,
+    "white": "before",
+    "black": "after",
+    "result": "0-1",
+    "termination": "CHECKMATE",
+    "plies": 134,
+    "seconds": {
+      "before": 137.9603644000017,
+      "after": 88.1597808999868
+    }
+  },
+  {
+    "game": 5,
+    "white": "after",
+    "black": "before",
+    "result": "1/2-1/2",
+    "termination": "THREEFOLD_REPETITION",
+    "plies": 112,
+    "seconds": {
+      "before": 112.07375390000016,
+      "after": 67.88124999999127
+    }
+  },
+  {
+    "game": 6,
+    "white": "before",
+    "black": "after",
+    "result": "1/2-1/2",
+    "termination": "STALEMATE",
+    "plies": 126,
+    "seconds": {
+      "before": 129.61995849998493,
+      "after": 84.47016690002056
+    }
+  }
+]

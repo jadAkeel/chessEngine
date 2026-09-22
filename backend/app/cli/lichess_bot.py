@@ -36,6 +36,8 @@ from app.api.main import (
     _legal_moves_with_probs,
     COMPLEX_TOPK_BOOST_THRESHOLD,
     COMPLEX_TOPK_MAX,
+    MIN_ADAPTIVE_SIMULATIONS,
+    MID_PROBE_RUNG,
 )
 
 logger = setup_logging("cli.lichess_bot")
@@ -84,6 +86,15 @@ def get_api_token() -> str:
     return token.strip()
 
 
+# Below this per-move budget a search cannot finish its first batch; play the policy move.
+MIN_CLOCK_SEARCH_SEC = 0.35
+
+
+def _estimated_moves_to_go(board: chess.Board) -> int:
+    """Horizon for spreading the remaining clock: long early, never below 20 moves."""
+    return max(20, 50 - int(board.fullmove_number))
+
+
 def calculate_dynamic_thinking(
     board: chess.Board,
     time_left_sec: float,
@@ -95,6 +106,9 @@ def calculate_dynamic_thinking(
     1. Forced moves (1 legal move -> instant).
     2. Tactical criticality (check, queen attack, high captures).
     3. Remaining clock budget (spend more when time is luxurious, conserve when low).
+
+    The simulation count is a cap; the search itself observes the time budget as a
+    cooperative deadline, so with a healthy clock the cap is simply ``max_sims``.
     """
     legal_moves = list(board.legal_moves)
     num_legal = len(legal_moves)
@@ -120,7 +134,10 @@ def calculate_dynamic_thinking(
     if not is_check:
         opp_board = board.copy(stack=False)
         opp_board.turn = not board.turn
+        opp_board.ep_square = None
         for opp_move in opp_board.legal_moves:
+            if not opp_board.gives_check(opp_move):
+                continue
             opp_board.push(opp_move)
             if opp_board.is_checkmate():
                 opponent_threatens_mate = True
@@ -142,46 +159,28 @@ def calculate_dynamic_thinking(
         urgency = "normal"
         urgency_multiplier = 1.0
 
-    # 3. Base time allocation based on clock
-    estimated_remaining_moves = 25
-    base_allocated = (time_left_sec / max(1, estimated_remaining_moves)) + (increment_sec * 0.75)
+    # 3. Base time allocation: spread the clock over the expected remaining moves
+    #    (a long horizon early, at least 20 moves later) plus most of the increment.
+    moves_to_go = _estimated_moves_to_go(board)
+    base_allocated = (time_left_sec / moves_to_go) + (increment_sec * 0.8)
     allocated_time = base_allocated * urgency_multiplier
-    max_safe = max(0.1, time_left_sec - 1.0) if time_left_sec > 5.0 else max(0.05, time_left_sec * 0.5)
+    # Never burn more than a quarter of the remaining clock on one move, and keep
+    # a one-second reserve for network latency once the clock gets low.
+    if time_left_sec > 5.0:
+        max_safe = max(0.1, min(time_left_sec * 0.25, time_left_sec - 1.0))
+    else:
+        max_safe = max(0.05, time_left_sec * 0.15)
     allocated_time = min(allocated_time, max_safe)
 
-    # 4. Compute simulations based on remaining clock & urgency
+    # 4. Simulation cap: the deadline governs; only a low clock needs a hard cap.
     if time_left_sec < 5.0:
         sims = 16
     elif time_left_sec < 15.0:
         sims = 24 if urgency != "critical" else 32
     elif time_left_sec < 30.0:
-        sims = 32 if urgency != "critical" else 48
-    elif time_left_sec < 60.0:
-        if urgency == "critical":
-            sims = min(max_sims, 96)
-        elif urgency == "sharp":
-            sims = min(max_sims, 64)
-        else:
-            sims = min(max_sims, 48)
-    elif time_left_sec < 120.0:
-        if urgency == "critical":
-            sims = min(max_sims, 160)
-        elif urgency == "sharp":
-            sims = min(max_sims, 112)
-        elif urgency == "quiet":
-            sims = min(max_sims, 48)
-        else:
-            sims = min(max_sims, 80)
+        sims = min(max_sims, 48 if urgency != "critical" else 64)
     else:
-        # Plenty of time (> 120s): take time to calculate deeply!
-        if urgency == "critical":
-            sims = min(max_sims, 256)
-        elif urgency == "sharp":
-            sims = min(max_sims, 160)
-        elif urgency == "quiet":
-            sims = min(max_sims, 64)
-        else:
-            sims = min(max_sims, 112)
+        sims = max_sims
 
     return max(1, sims), max(0.05, allocated_time), urgency
 
@@ -629,6 +628,11 @@ class LichessBot:
             return legal_moves[0].uci()
 
         started = time.monotonic()
+        budget = max(0.05, float(allocated_time_sec))
+
+        def remaining() -> float:
+            return budget - (time.monotonic() - started)
+
         if num_simulations >= 180:
             depth = 8
         elif num_simulations >= 120:
@@ -678,7 +682,13 @@ class LichessBot:
                 and not decisive_fast
                 and _is_light_adaptive_search(complexity, adaptive_reasons, depth)
             )
-            use_adaptive = bool((full_adaptive or light_adaptive) and num_simulations > 16)
+            # Clock time is only useful if it is spent: with a real per-move budget the
+            # search always runs (the deadline bounds it), and the bare policy move is
+            # reserved for a nearly exhausted clock.
+            clock_search = bool(num_simulations > 16 and budget >= MIN_CLOCK_SEARCH_SEC)
+            if clock_search and not (full_adaptive or light_adaptive):
+                adaptive_reasons.append("clock_budget_available")
+            use_adaptive = bool((full_adaptive or light_adaptive or clock_search) and num_simulations > 16)
             light_budget = bool(not full_adaptive)
 
             if not use_adaptive:
@@ -688,25 +698,35 @@ class LichessBot:
 
             if urgency == "critical":
                 simulation_steps = [max(1, num_simulations)]
+            elif decisive_fast:
+                # A clearly winning capture still gets a cheap search-based sanity check.
+                simulation_steps = [min(max(1, num_simulations), MIN_ADAPTIVE_SIMULATIONS)]
             else:
                 simulation_steps = _adaptive_simulation_steps(
                     depth, complexity, num_simulations, light=light_budget
                 )
+                if clock_search and simulation_steps and simulation_steps[-1] < num_simulations:
+                    simulation_steps.append(int(num_simulations))
             if not simulation_steps:
                 return fast_move
 
             chosen_move = fast_move
             for step_sims in simulation_steps:
-                if time.monotonic() - started >= allocated_time_sec * 0.95 and chosen_move:
-                    logger.info("Time budget reached; playing %s at %d sims", chosen_move, step_sims)
+                time_left = remaining()
+                if time_left <= 0.02 and chosen_move:
+                    logger.info("Time budget reached; playing %s before %d sims", chosen_move, step_sims)
                     break
 
+                # Rungs are cumulative: the shared search tree keeps the visits of the
+                # previous rung, so climbing the ladder only adds the missing rollouts.
                 mcts_move, mcts_san, mcts_root_debug = _best_move_with_mcts(
                     self.engine.model,
                     board,
                     self.engine.device,
                     step_sims,
                     include_diagnostics=True,
+                    time_limit_sec=max(0.05, time_left * 0.9),
+                    cumulative=True,
                 )
                 mcts_safety = _move_safety_flags(board, mcts_move)
                 step_confident = _mcts_confident_enough(
@@ -717,11 +737,15 @@ class LichessBot:
                     light=light_budget,
                     current_simulations=step_sims,
                 )
+                # With clock to spare, agreement after the first small rung is not a
+                # reason to stop; keep climbing until at least the mid rung.
+                if clock_search and step_sims < MID_PROBE_RUNG and remaining() > 0.3:
+                    step_confident = False
 
                 safe_fallback = _safe_candidate_fallback(board, candidates) if _has_safety_risk(mcts_safety) else None
                 if safe_fallback is not None and safe_fallback[0] != mcts_move:
                     rejected = [k for k, v in mcts_safety.items() if v]
-                    if any(s > step_sims for s in simulation_steps):
+                    if any(s > step_sims for s in simulation_steps) and remaining() > 0.1:
                         logger.info("Safety risk on %s (%s); climbing simulation ladder to resolve...", mcts_move, rejected)
                         continue
                     chosen_move = safe_fallback[0]

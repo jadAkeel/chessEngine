@@ -49,3 +49,6 @@ backend/checkpoints/
 *.pickle
 *.npz
 *.npy
+
+# Browser automation artifacts
+.playwright-mcp/

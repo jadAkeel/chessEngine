@@ -4,6 +4,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import os
 from pathlib import Path
+import threading
 import time
 
 import chess
@@ -978,12 +979,46 @@ def _fast_policy_move(
     return best.uci(), board.san(best), scored
 
 
-def _best_move_with_mcts(model, board, device, simulations, include_diagnostics: bool = False):
-    start = time.perf_counter()
-    logger.info(f"[MCTS START] sims={simulations}")
+# One search tree per loaded model: consecutive requests for the same game reuse the
+# subtree of the moves actually played, and the adaptive 30 -> 64 -> 96 ladder becomes
+# cumulative instead of restarting from scratch at every rung.
+_MCTS_BY_MODEL: dict[tuple[int, str], MCTS] = {}
+_SEARCH_LOCK = threading.Lock()
 
-    mcts = MCTS(model=model, cfg=getattr(model, 'cfg', None), device=device)
-    result = mcts.search(board, num_simulations=int(simulations))
+
+def _get_mcts(model, device) -> MCTS:
+    key = (id(model), str(device))
+    mcts = _MCTS_BY_MODEL.get(key)
+    if mcts is None:
+        mcts = MCTS(model=model, cfg=getattr(model, 'cfg', None), device=device)
+        _MCTS_BY_MODEL[key] = mcts
+    return mcts
+
+
+def _best_move_with_mcts(
+    model,
+    board,
+    device,
+    simulations,
+    include_diagnostics: bool = False,
+    time_limit_sec: float | None = None,
+    cumulative: bool = False,
+):
+    """Run MCTS and return the chosen move.
+
+    ``simulations`` is the number of new rollouts, or with ``cumulative=True`` the
+    total root visits to reach (counting visits retained from an earlier search of
+    the same position). ``time_limit_sec`` is a cooperative deadline.
+    """
+    start = time.perf_counter()
+    mcts = _get_mcts(model, device)
+    with _SEARCH_LOCK:
+        target = max(1, int(simulations))
+        retained = mcts.retained_visits(board) if cumulative else 0
+        run = max(1, target - retained)
+        logger.info(f"[MCTS START] sims={run} target={target} retained={retained} budget={time_limit_sec}")
+        kwargs = {} if time_limit_sec is None else {'time_limit_sec': max(0.01, float(time_limit_sec))}
+        result = mcts.search(board, num_simulations=run, **kwargs)
 
     move = result.get('best_move')
 
@@ -991,11 +1026,15 @@ def _best_move_with_mcts(model, board, device, simulations, include_diagnostics:
         logger.error("[MCTS ERROR] MCTS did not return a legal move")
         raise HTTPException(500, 'MCTS did not return a legal move')
 
-    logger.info(f"[MCTS BEST MOVE] {move.uci()}")
-    logger.info(f"[MCTS DONE] move={move.uci()} | search_ms={_elapsed_ms(start)}")
+    logger.info(
+        f"[MCTS DONE] move={move.uci()} | root_visits={sum(result.get('visit_counts', {}).values())} | "
+        f"completed={result.get('completed_simulations')} | search_ms={_elapsed_ms(start)}"
+    )
     if include_diagnostics:
         return move.uci(), board.san(move), result.get('root_diagnostics', [])
     return move.uci(), board.san(move)
+
+
 # ================= LIFESPAN =================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1254,6 +1293,7 @@ def fastmove(req: FastMoveRequest):
                     _get_device(),
                     step_simulations,
                     include_diagnostics=True,
+                    cumulative=True,
                 )
                 mcts_safety = _move_safety_flags(board, mcts_move)
                 step_confident = _mcts_confident_enough(
@@ -1299,7 +1339,8 @@ def fastmove(req: FastMoveRequest):
         except Exception:
             logger.exception("/fastmove adaptive MCTS failed; falling back to fast policy")
         search_ms = _elapsed_ms(search_start)
-        simulation_total = sum(int(attempt.get('sims', 0)) for attempt in mcts_attempts)
+        # Rungs are cumulative on one shared tree, so the work done is the highest rung reached.
+        simulation_total = max((int(attempt.get('sims', 0)) for attempt in mcts_attempts), default=0)
 
     final_safety = _move_safety_flags(board, move)
     if _has_safety_risk(final_safety):

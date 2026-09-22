@@ -101,7 +101,15 @@ def passed_pawn_bonus(board: chess.Board, square: int, color: chess.Color) -> in
 
 
 def mobility_bonus(board):
-    return 2 * (board.legal_moves.count())
+    """Side-to-move mobility minus the opponent's, so the term does not hand a
+    constant bonus to whoever is to move at a leaf (which alternates with depth)."""
+    own = board.legal_moves.count()
+    if board.is_check():
+        return 2 * own
+    mirror = board.copy(stack=False)
+    mirror.turn = not mirror.turn
+    mirror.ep_square = None
+    return 2 * (own - mirror.legal_moves.count())
 
 
 def evaluate_board(board: chess.Board):

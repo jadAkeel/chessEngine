@@ -1,5 +1,7 @@
 # Engine strength investigation — 2026-09-05
 
+> Follow-up: [Search strength repair — 2026-09-22](SEARCH_STRENGTH_2026-09-22.md) (virtual loss, FPU, thread plan, penalty caching, tree reuse, clock management).
+
 تمّت إعادة إنتاج ثلاث نقلات خاطئة من مباراة فعلية بنفس الموديل، ثم إصلاح أسباب مباشرة في البحث وحماية القطع وإدارة الوقت. التحسّن المثبت هنا تكتيكي وتشغيلي؛ لم يُقَس ارتفاع Elo بعد، ولم تُعدَّل الأوزان أو ملفات الداتا الأصلية.
 
 ## Scope and evidence

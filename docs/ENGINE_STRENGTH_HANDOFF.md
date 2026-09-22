@@ -1,5 +1,7 @@
 # Engine strength handoff
 
+> **Update 2026-09-22:** the search itself was found to be flattening root visits (virtual loss), running 8 torch threads on a hybrid CPU, and the Lichess bot was not spending its clock. See [SEARCH_STRENGTH_2026-09-22.md](SEARCH_STRENGTH_2026-09-22.md) for evidence, fixes, paired-match results and the new config keys. The notes below describe the 2026-09-05 state.
+
 ## 1. Repository context
 
 Root: `C:/Users/10User/Desktop/ai/chesEngineWithData`. Python/PyTorch chess engine, MCTS, FastAPI, React/Vite, and Lichess bot CLI. No Git repository exists in this workspace. Follow `AGENTS.md`; use `apply_patch`, preserve model/data artifacts, and avoid unrelated changes. Delegation requires an explicit request.

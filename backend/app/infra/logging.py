@@ -55,7 +55,15 @@ def setup_logging(
         return logger
 
     use_json = json_logs if json_logs is not None else bool(get_current_config().system.json_logs)
-    handler = logging.StreamHandler(sys.stdout)
+    stream = sys.stdout
+    # Windows consoles often default to cp1252; keep non-ASCII log text from raising.
+    reconfigure = getattr(stream, "reconfigure", None)
+    if callable(reconfigure):
+        try:
+            reconfigure(errors="replace")
+        except (ValueError, OSError):
+            pass
+    handler = logging.StreamHandler(stream)
 
     if use_json:
         formatter = JsonFormatter()

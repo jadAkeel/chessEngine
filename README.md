@@ -100,6 +100,12 @@ On Render, set `GEMINI_API_KEY` as a secret for `chess-engine-api`. Never create
 `POST /gemini-move` with a JSON body containing only the current `fen`. It validates Gemini's
 structured UCI response against `python-chess` before returning the move.
 
+## Engine strength notes
+
+- `docs/SEARCH_STRENGTH_2026-09-22.md` — search/penalty/time-management repairs with measurements.
+- `docs/ENGINE_STRENGTH_AUDIT.md` — earlier tactical and training-integrity audit.
+- On hybrid P/E-core CPUs keep `system.cpu_threads: 4` (default); more threads makes inference dramatically slower.
+
 ## Notes
 
 - If no checkpoint exists, the backend starts with random weights.

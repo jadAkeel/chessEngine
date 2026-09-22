@@ -37,7 +37,9 @@ def _cap_for_role(role: str, device: str) -> int:
         return 4
     if role in {"training", "trainer"}:
         return 16
-    return 8
+    # Search inference runs small batches; beyond 4 intra-op threads hybrid
+    # P/E-core CPUs oversubscribe and latency explodes (see config/default.yaml).
+    return 4
 
 
 def resolve_thread_plan(

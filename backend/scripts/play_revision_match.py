@@ -18,7 +18,8 @@ def worker(args):
     from app.infra.config import load_config
     torch.manual_seed(0)
     np.random.seed(0)
-    engine = Engine(model_path=args.model, cfg=load_config(args.config), device='cpu', cache_size=0)
+    config = args.worker_config or args.config
+    engine = Engine(model_path=args.model, cfg=load_config(config), device='cpu', cache_size=0)
     for line in sys.stdin:
         request = json.loads(line)
         board = chess.Board()
@@ -41,12 +42,15 @@ def main(args):
             env = dict(os.environ, PYTHONPATH=root, PYTHONIOENCODING='utf-8')
             log = (out / (name + '.log')).open('w', encoding='utf-8')
             logs.append(log)
+            worker_config = args.before_config if name == 'before' and args.before_config else args.config
             processes[name] = subprocess.Popen([sys.executable, '-u', str(Path(__file__).resolve()),
                 '--worker', '--model', args.model, '--config', args.config,
+                '--worker-config', worker_config,
                 '--simulations', str(args.simulations)], env=env, stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=log, text=True, encoding='utf-8')
-        openings = ['e2e4 e7e5 g1f3 b8c6', 'd2d4 d7d5 c2c4 e7e6']
-        for index in range(4):
+        openings = ['e2e4 e7e5 g1f3 b8c6', 'd2d4 d7d5 c2c4 e7e6', 'e2e4 c7c5 g1f3 d7d6',
+                    'd2d4 g8f6 c2c4 e7e6', 'e2e4 e7e6 d2d4 d7d5', 'c2c4 e7e5 b1c3 g8f6']
+        for index in range(args.games):
             white = 'after' if index % 2 == 0 else 'before'
             black = 'before' if white == 'after' else 'after'
             board = chess.Board()
@@ -54,7 +58,7 @@ def main(args):
             game.headers.update(Event='Local revision comparison', White=white, Black=black,
                                 TimeControl='-', SimulationBudget=str(args.simulations))
             node = game
-            for move in openings[index // 2].split():
+            for move in openings[(index // 2) % len(openings)].split():
                 board.push_uci(move)
                 node = node.add_variation(board.peek())
             timings = {'before': 0.0, 'after': 0.0}
@@ -102,6 +106,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--worker', action='store_true')
     parser.add_argument('--before')
+    parser.add_argument('--before-config', help='config file for the "before" worker (defaults to --config)')
+    parser.add_argument('--worker-config', help=argparse.SUPPRESS)
+    parser.add_argument('--games', type=int, default=4, help='games to play; colours alternate every game')
     parser.add_argument('--model', default=str(Path('models/best_model.pth').resolve()))
     parser.add_argument('--config', default=str(Path('config/default.yaml').resolve()))
     parser.add_argument('--simulations', type=int, default=64)

@@ -47,7 +47,15 @@ def principle_penalty_components(
     after: chess.Board,
     move: chess.Move,
     cfg: PrinciplePenaltiesConfig,
+    *,
+    include_tactics: bool = True,
 ) -> PrinciplePenaltyResult:
+    """Score how much ``move`` violates general principles.
+
+    ``include_tactics`` controls the short mate/fork scan of the opponent's
+    replies, the only component that has to push every reply; deep in a search
+    tree the caller can skip it.
+    """
     if not bool(getattr(cfg, "enabled", False)):
         return PrinciplePenaltyResult({}, {})
 
@@ -66,7 +74,8 @@ def principle_penalty_components(
     _king_safety(before, after, move, mover, add)
     _opening_development(before, after, move, mover, add)
     _center_control(before, after, move, mover, add)
-    _tactics(after, mover, add)
+    if include_tactics:
+        _tactics(after, mover, add)
     _pawn_structure(before, after, move, mover, add)
     _piece_activity(before, after, move, mover, add)
     _rook_activity(before, after, move, mover, add)
@@ -460,6 +469,8 @@ def _opponent_has_mate_in_one(board: chess.Board, opponent: chess.Color) -> bool
     if board.turn != opponent:
         return False
     for reply in board.legal_moves:
+        if not board.gives_check(reply):
+            continue
         board.push(reply)
         try:
             if board.is_checkmate():
