@@ -1,5 +1,7 @@
 # Engine strength handoff
 
+> **Update 2026-09-23:** second pass and corrections to the 09-22 evidence — see [SEARCH_STRENGTH_2026-09-23.md](SEARCH_STRENGTH_2026-09-23.md).
+>
 > **Update 2026-09-22:** the search itself was found to be flattening root visits (virtual loss), running 8 torch threads on a hybrid CPU, and the Lichess bot was not spending its clock. See [SEARCH_STRENGTH_2026-09-22.md](SEARCH_STRENGTH_2026-09-22.md) for evidence, fixes, paired-match results and the new config keys. The notes below describe the 2026-09-05 state.
 
 ## 1. Repository context

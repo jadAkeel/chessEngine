@@ -103,6 +103,7 @@ structured UCI response against `python-chess` before returning the move.
 ## Engine strength notes
 
 - `docs/SEARCH_STRENGTH_2026-09-22.md` — search/penalty/time-management repairs with measurements.
+- `docs/SEARCH_STRENGTH_2026-09-23.md` — second pass: repetition draws, batch terminals, LCB, penalty/screen/bot/`/fastmove` fixes, equal-effort match; corrects the 09-22 claims.
 - `docs/ENGINE_STRENGTH_AUDIT.md` — earlier tactical and training-integrity audit.
 - On hybrid P/E-core CPUs keep `system.cpu_threads: 4` (default); more threads makes inference dramatically slower.
 

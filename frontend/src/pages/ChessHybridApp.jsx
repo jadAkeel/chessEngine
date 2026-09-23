@@ -192,6 +192,14 @@ function getGameEndInfo(game, playerColor, isMultiplayer) {
   };
 }
 
+// Game history for the engine: with it the server sees repetitions and keeps its
+// search tree from one move to the next (moves are UCI from the history's start).
+function historyPayload(game) {
+  const history = game.history({ verbose: true });
+  if (history.length === 0) return {};
+  return { start_fen: history[0].before, moves: history.map((move) => move.lan) };
+}
+
 export default function ChessHybridApp() {
   const gameRef = useRef(new Chess());
   const boardContainerRef = useRef(null);
@@ -421,8 +429,8 @@ export default function ChessHybridApp() {
               fen: requestFen,
               topk: candidateCount,
               depth: engineDepth,
-              max_simulations: 96,
-              adaptive: true
+              adaptive: true,
+              ...historyPayload(game)
             })
       });
       if (!res.ok) {

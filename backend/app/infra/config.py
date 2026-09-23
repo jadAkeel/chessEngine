@@ -126,6 +126,21 @@ class MCTSConfig:
     virtual_loss: float = 1.0
     fpu_reduction: float = 0.25
     reuse_tree: bool = True
+    # How heuristic edge penalties enter selection in play: "offset" (constant score
+    # offset), "progressive" (offset fading as 1/(1+visits)) or "off".
+    penalty_mode: str = "offset"
+    # Play mode: a position repeated inside the search path is scored as a draw.
+    twofold_draw: bool = True
+    # Play mode: stop once the remaining budget cannot change the most-visited move.
+    smart_pruning: bool = True
+    # Play mode: root moves are ordered by value - lcb_scale / sqrt(visits) among moves
+    # with a real share of the visits; 0 means pure visit count.
+    lcb_scale: float = 1.0
+    # Graded mop-up value when a queen/rook side faces a bare king.
+    mopup_endgames: bool = True
+    # Start each search with small inference batches and grow them with the tree
+    # (clamp(visits // 16, 4, inference_batch_size)); False = always inference_batch_size.
+    batch_growth: bool = True
 
     queen_blunder_penalty: float = 0.5
     queen_hanging_penalty: float = 0.24
@@ -186,6 +201,8 @@ class SystemConfig:
     cpu_threads: int = 0
     interop_threads: int = 0
     worker_thread_policy: str = "auto"
+    # Frozen TorchScript copy of the network for inference (same outputs, ~25% faster on CPU).
+    fast_inference: bool = True
 
 
 @dataclass(frozen=True)
@@ -251,6 +268,12 @@ _FLAT_MAP = {
     "MCTS_VIRTUAL_LOSS": ("mcts", "virtual_loss"),
     "MCTS_FPU_REDUCTION": ("mcts", "fpu_reduction"),
     "MCTS_REUSE_TREE": ("mcts", "reuse_tree"),
+    "MCTS_PENALTY_MODE": ("mcts", "penalty_mode"),
+    "MCTS_TWOFOLD_DRAW": ("mcts", "twofold_draw"),
+    "MCTS_SMART_PRUNING": ("mcts", "smart_pruning"),
+    "MCTS_LCB_SCALE": ("mcts", "lcb_scale"),
+    "MCTS_MOPUP_ENDGAMES": ("mcts", "mopup_endgames"),
+    "MCTS_BATCH_GROWTH": ("mcts", "batch_growth"),
     "PRINCIPLE_MAX_TREE_DEPTH": ("principle_penalties", "max_tree_depth"),
     "QUEEN_BLUNDER_PENALTY": ("mcts", "queen_blunder_penalty"),
     "QUEEN_HANGING_PENALTY": ("mcts", "queen_hanging_penalty"),
@@ -454,6 +477,10 @@ def validate(cfg: AppConfig | None = None) -> None:
         raise ValueError("mcts.virtual_loss must be >= 0")
     if not (0.0 <= cfg.mcts.fpu_reduction <= 2.0):
         raise ValueError("mcts.fpu_reduction must be in [0, 2]")
+    if normalize_penalty_mode(cfg.mcts.penalty_mode) not in {"offset", "progressive", "off"}:
+        raise ValueError("mcts.penalty_mode must be one of offset/progressive/off")
+    if not (0.0 <= cfg.mcts.lcb_scale <= 5.0):
+        raise ValueError("mcts.lcb_scale must be in [0, 5]")
     if not (0.0 <= cfg.mcts.classical_value_alpha <= 1.0):
         raise ValueError("mcts.classical_value_alpha must be in [0, 1]")
     if cfg.mcts.queen_blunder_penalty < 0.0:
@@ -505,6 +532,13 @@ def validate(cfg: AppConfig | None = None) -> None:
 
 
 validate_config = validate
+
+
+def normalize_penalty_mode(value: Any) -> str:
+    """YAML 1.1 reads an unquoted ``off`` as the boolean False."""
+    if value is False:
+        return "off"
+    return str(value).strip().lower()
 
 
 def _validate_principle_penalties(principles: PrinciplePenaltiesConfig) -> None:

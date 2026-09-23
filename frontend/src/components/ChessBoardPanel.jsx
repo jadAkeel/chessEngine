@@ -8,6 +8,14 @@ const DEFAULT_API_BASE_URL = import.meta.env.PROD
   : 'http://localhost:8000'
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, '')
 
+// Game history for the engine: with it the server sees repetitions and keeps its
+// search tree from one move to the next (moves are UCI from the history's start).
+function historyPayload(game) {
+  const history = game.history({ verbose: true })
+  if (history.length === 0) return {}
+  return { start_fen: history[0].before, moves: history.map((move) => move.lan) }
+}
+
 export default function ChessBoardPanel() {
   const gameRef = useRef(new Chess())
   const [fen, setFen] = useState(gameRef.current.fen())
@@ -54,7 +62,7 @@ export default function ChessBoardPanel() {
       const res = await fetch(`${API_BASE_URL}/fastmove`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fen: currentFen, topk: 16, depth: 6, max_simulations: 96, adaptive: true })
+        body: JSON.stringify({ fen: currentFen, topk: 16, depth: 6, adaptive: true, ...historyPayload(gameRef.current) })
       })
       const data = await res.json()
       const uci = data.move || data.moves?.[0]?.uci || data.best_move

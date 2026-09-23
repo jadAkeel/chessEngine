@@ -142,7 +142,7 @@ def test_live_game_cannot_ignore_hanging_queen_by_moving_a_rook():
     board = chess.Board('r1b2rk1/pp3ppp/3q2n1/3pp3/P7/1P1BR2Q/5PPP/R5K1 w - - 0 19')
     ignoring = search._move_penalty_components(board, chess.Move.from_uci('a1e1'))
     saving = search._move_penalty_components(board, chess.Move.from_uci('h3g3'))
-    assert ignoring['tactical'] >= 0.6
+    assert ignoring['tactical'] >= 0.5  # queen for bishop: 570 cp of 900, proportional penalty
     assert saving['tactical'] < ignoring['tactical']
 
 
@@ -173,7 +173,7 @@ def test_all_material_losing_candidates_keep_the_least_costly_option():
     board = chess.Board()
     moves = [chess.Move.from_uci(uci) for uci in ['e2e4', 'd2d4', 'c2c4']]
     with patch('app.game.tactics.has_forcing_mate_in_two', return_value=False), patch(
-        'app.game.tactics.immediate_exchange_loss', side_effect=[900, 320, 500]
+        'app.game.tactics.immediate_exchange_loss', side_effect=[0, 900, 320, 500]  # first: null-move baseline
     ):
         chosen, rejected = select_safe_move(board, moves)
     assert chosen == moves[1]

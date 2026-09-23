@@ -1,5 +1,7 @@
 # Search strength repair — 2026-09-22
 
+> **Correction 2026-09-23:** the paired match below was not equal effort (tree reuse gave the new side ≈ 28 % more visits) and not statistically significant; its game 6 draw was a stalemate bug. Several fixes here were revised. See [SEARCH_STRENGTH_2026-09-23.md](SEARCH_STRENGTH_2026-09-23.md).
+
 مراجعة كاملة لكل ما يؤثّر على قوّة اللعب في البحث (MCTS)، ونظام العقوبات (penalties)، ومسار النقلة السريعة (fast move) وبوت Lichess — **بدون أي تغيير في أوزان الشبكة العصبية** (`models/best_model.pth` لم يُمَسّ). النتيجة المثبتة: البحث نفسه كان معطوباً (توزيع الزيارات على نقلات الجذر شبه منتظم) وبطيئاً جداً (6–11 محاكاة/ثانية)، وبعد الإصلاح صار البحث يركّز فعلاً على أفضل النقلات ويصل لعمق 8 أنصاف نقلات، وربح مباراة مقارنة مباشرة بنفس الأوزان ونفس عدد المحاكاة.
 
 Same checkpoint, same config values except the new keys listed below. Everything here is reproducible from `backend/` with `$env:PYTHONPATH = "."`.

@@ -19,6 +19,7 @@ from app.infra.device import select_device
 from app.infra.logging import setup_logging
 from app.infra.runtime import configure_torch_runtime
 from app.game.principles import principle_penalty_components
+from app.game.tactics import find_forcing_mate_in_two, find_mate_in_one, select_safe_move
 from app.mcts.search import MCTS
 from app.model.checkpoint import CheckpointLoadError, load_checkpoint, load_compatible_weights
 from app.model.network import ChessNet
@@ -119,9 +120,17 @@ class PredictRequest(FenRequest):
 
 class FastMoveRequest(FenRequest):
     topk: int | None = Field(default=16, ge=1, le=36)
+    # UI strength slider: maps to thinking time (FASTMOVE_TIME_BY_DEPTH) unless time_budget_sec is given.
     depth: int | None = Field(default=6, ge=1, le=10)
-    max_simulations: int | None = Field(default=None, ge=0, le=180)
+    # Cap on root visits for the search (retained visits count towards it).
+    max_simulations: int | None = Field(default=None, ge=0, le=1024)
+    # False: instant policy move (screened), no search.
     adaptive: bool = True
+    time_budget_sec: float | None = Field(default=None, gt=0.0, le=30.0)
+    # Optional game history: UCI moves from start_fen (default: the standard start).
+    # When it reproduces `fen`, the search sees repetitions and keeps its tree between moves.
+    moves: list[str] | None = Field(default=None, max_length=1200)
+    start_fen: str | None = None
 
 
 class MoveRequest(FenRequest):
@@ -995,6 +1004,36 @@ def _get_mcts(model, device) -> MCTS:
     return mcts
 
 
+def _run_mcts(
+    model,
+    board,
+    device,
+    simulations,
+    *,
+    time_limit_sec: float | None = None,
+    cumulative: bool = False,
+) -> dict:
+    """Run the shared per-model MCTS and return its raw result.
+
+    ``simulations`` is the number of new rollouts, or with ``cumulative=True`` the
+    total root visits to reach (counting visits retained from an earlier search of
+    the same game). ``time_limit_sec`` is a cooperative deadline.
+    """
+    mcts = _get_mcts(model, device)
+    with _SEARCH_LOCK:
+        target = max(1, int(simulations))
+        retained = mcts.retained_visits(board) if cumulative else 0
+        run = max(1, target - retained)
+        logger.info(f"[MCTS START] sims={run} target={target} retained={retained} budget={time_limit_sec}")
+        kwargs = {} if time_limit_sec is None else {'time_limit_sec': max(0.01, float(time_limit_sec))}
+        result = mcts.search(board, num_simulations=run, **kwargs)
+    move = result.get('best_move')
+    if move is None or move not in board.legal_moves:
+        logger.error("[MCTS ERROR] MCTS did not return a legal move")
+        raise HTTPException(500, 'MCTS did not return a legal move')
+    return result
+
+
 def _best_move_with_mcts(
     model,
     board,
@@ -1004,28 +1043,9 @@ def _best_move_with_mcts(
     time_limit_sec: float | None = None,
     cumulative: bool = False,
 ):
-    """Run MCTS and return the chosen move.
-
-    ``simulations`` is the number of new rollouts, or with ``cumulative=True`` the
-    total root visits to reach (counting visits retained from an earlier search of
-    the same position). ``time_limit_sec`` is a cooperative deadline.
-    """
     start = time.perf_counter()
-    mcts = _get_mcts(model, device)
-    with _SEARCH_LOCK:
-        target = max(1, int(simulations))
-        retained = mcts.retained_visits(board) if cumulative else 0
-        run = max(1, target - retained)
-        logger.info(f"[MCTS START] sims={run} target={target} retained={retained} budget={time_limit_sec}")
-        kwargs = {} if time_limit_sec is None else {'time_limit_sec': max(0.01, float(time_limit_sec))}
-        result = mcts.search(board, num_simulations=run, **kwargs)
-
-    move = result.get('best_move')
-
-    if move is None or move not in board.legal_moves:
-        logger.error("[MCTS ERROR] MCTS did not return a legal move")
-        raise HTTPException(500, 'MCTS did not return a legal move')
-
+    result = _run_mcts(model, board, device, simulations, time_limit_sec=time_limit_sec, cumulative=cumulative)
+    move = result['best_move']
     logger.info(
         f"[MCTS DONE] move={move.uci()} | root_visits={sum(result.get('visit_counts', {}).values())} | "
         f"completed={result.get('completed_simulations')} | search_ms={_elapsed_ms(start)}"
@@ -1187,225 +1207,127 @@ def predict(req: PredictRequest):
     }
 
 
-@app.post('/fastmove')
-def fastmove(req: FastMoveRequest):
-    total_start = time.perf_counter()
-    logger.info(
-        f"/fastmove START | topk={req.topk} | depth={req.depth} | "
-        f"max_sims={req.max_simulations} | adaptive={req.adaptive}"
-    )
+# Thinking time per UI depth on this CPU (the search also stops early once its move is settled).
+FASTMOVE_TIME_BY_DEPTH = {1: 0.3, 2: 0.5, 3: 0.8, 4: 1.2, 5: 1.6, 6: 2.0, 7: 2.6, 8: 3.2, 9: 4.0, 10: 5.0}
+FASTMOVE_DEFAULT_MAX_SIMULATIONS = 400
 
-    model = _get_model()
-    validate_start = time.perf_counter()
+
+def _board_from_request(req: FastMoveRequest) -> tuple[chess.Board, bool]:
+    """The position to search, with its game history when the request carries one that
+    reproduces ``fen`` (otherwise the FEN alone)."""
     board = _validate_fen(req.fen)
-    validate_ms = _elapsed_ms(validate_start)
+    if not req.moves:
+        return board, False
+    try:
+        replay = chess.Board(req.start_fen) if req.start_fen else chess.Board()
+        for uci in req.moves:
+            move = chess.Move.from_uci(uci)
+            if move not in replay.legal_moves:
+                raise ValueError(f"illegal history move {uci}")
+            replay.push(move)
+    except ValueError as exc:
+        logger.warning(f"/fastmove history ignored: {exc}")
+        return board, False
+    if replay.fen().split()[:4] != board.fen().split()[:4]:
+        logger.warning(f"/fastmove history ends at {replay.fen()}, not at the requested FEN; using the FEN only")
+        return board, False
+    return replay, True
 
-    if board.is_game_over():
-        logger.warning("/fastmove game over")
-        raise HTTPException(400, 'Game over')
 
-    mate_move = _find_mate_in_one(board)
-    if mate_move is not None:
-        total_ms = _elapsed_ms(total_start)
-        logger.info(
-            f"/fastmove MATE_IN_ONE | move={mate_move.uci()} | "
-            f"validate_ms={validate_ms} | total_ms={total_ms}"
-        )
-        return {
-            'move': mate_move.uci(),
-            'san': board.san(mate_move),
-            'source': 'mate_in_one',
-            'value': None,
-            'candidates': [],
-            'adaptive': {
-                'depth': int(req.depth or 6),
-                'complexity': 999,
-                'reasons': ['mate_in_one'],
-                'simulations': 0,
-                'max_simulations': req.max_simulations,
-            },
-            'timing_ms': {
-                'validate': validate_ms,
-                'predict': 0.0,
-                'rank': 0.0,
-                'search': 0.0,
-                'total': total_ms,
-            },
-        }
+def _root_candidates(result: dict, limit: int) -> list[dict]:
+    rows = []
+    for item in result.get('root_diagnostics', [])[: max(1, int(limit))]:
+        rows.append({
+            'uci': item['uci'],
+            'san': item['san'],
+            'visits': item['visits'],
+            'value': round(-float(item['q']), 4),
+            'prior': item['prior'],
+        })
+    return rows
 
-    predict_start = time.perf_counter()
+
+def _policy_move(model, board: chess.Board, topk: int) -> tuple[chess.Move, float, list[dict]]:
+    """Instant move without search: fast policy ranking, proven mates first, then the screen."""
     with torch.no_grad():
         logits, value = model.predict(board, device=_get_device())
-    predict_ms = _elapsed_ms(predict_start)
+    raw_policy_top = _legal_moves_with_probs(board, logits, topk)
+    _move, _san, candidates = _fast_policy_move(board, logits, topk, raw_policy_top)
+    proven = find_mate_in_one(board) or find_forcing_mate_in_two(board)
+    if proven is not None:
+        return proven, 1.0, candidates
+    ranked = [chess.Move.from_uci(item['uci']) for item in candidates]
+    ranked += [move for move in board.legal_moves if move not in ranked]
+    chosen, _rejected = select_safe_move(board, ranked, root_value=float(value))
+    return chosen or ranked[0], float(value), candidates
 
-    rank_start = time.perf_counter()
-    raw_policy_top = _legal_moves_with_probs(board, logits, int(req.topk or 8))
-    move, san, candidates = _fast_policy_move(board, logits, int(req.topk or 8), raw_policy_top)
-    rank_ms = _elapsed_ms(rank_start)
-    fast_move, fast_san = move, san
-    fast_score_debug = _fast_score_diagnostics(board, candidates)
-    complexity, adaptive_reasons = _fastmove_complexity(board, candidates)
-    # In complex positions, expand the candidate pool for better fast-policy scoring.
-    # Complexity is intentionally NOT recomputed after this expansion so that the
-    # adaptive-search decision path (decisive_fast / full / light / off) remains
-    # based on the original position's assessment — keeping the overall behaviour
-    # stable and predictable regardless of the boosted candidate pool.
-    if complexity >= COMPLEX_TOPK_BOOST_THRESHOLD:
-        raw_policy_top = _legal_moves_with_probs(board, logits, COMPLEX_TOPK_MAX)
-        move, san, candidates = _fast_policy_move(board, logits, COMPLEX_TOPK_MAX, raw_policy_top)
-        fast_move, fast_san = move, san
-        fast_score_debug = _fast_score_diagnostics(board, candidates)
-    decisive_fast_choice = _is_decisive_fast_choice(board, candidates, adaptive_reasons)
-    full_adaptive_search = bool(
-        req.adaptive
-        and not decisive_fast_choice
-        and _should_use_adaptive_search(complexity, adaptive_reasons, req.depth)
-    )
-    light_adaptive_search = bool(
-        req.adaptive
-        and not full_adaptive_search
-        and not decisive_fast_choice
-        and _is_light_adaptive_search(complexity, adaptive_reasons, req.depth)
-    )
-    use_adaptive_search = bool(full_adaptive_search or light_adaptive_search)
-    light_budget = bool(not full_adaptive_search)
-    simulation_steps = (
-        _adaptive_simulation_steps(req.depth, complexity, req.max_simulations, light=light_budget)
-        if use_adaptive_search
-        else []
-    )
-    simulations = simulation_steps[-1] if simulation_steps else 0
-    simulation_total = 0
-    confidence_stop = False
-    search_ms = 0.0
-    source = 'fast_policy'
-    rejected_safety_reasons: list[str] = []
-    mcts_root_debug: list[dict] = []
-    mcts_attempts: list[dict] = []
 
-    if simulation_steps:
+@app.post('/fastmove')
+def fastmove(req: FastMoveRequest):
+    """The web UI's engine move.
+
+    With ``adaptive`` (the UI default) this is one time-bounded search: the depth
+    slider sets the thinking time, ``max_simulations`` caps root visits, the tree
+    carries over between moves when the request includes the game history, and
+    the search stops early once its move cannot change. Only proven tactics
+    (short mates, dropped material) can override the searched move. Without
+    ``adaptive`` it is an instant, screened policy move.
+    """
+    total_start = time.perf_counter()
+    model = _get_model()
+    validate_start = time.perf_counter()
+    board, with_history = _board_from_request(req)
+    validate_ms = _elapsed_ms(validate_start)
+    if board.is_game_over(claim_draw=False) or board.is_repetition(3):
+        raise HTTPException(400, 'Game over')
+
+    depth = int(req.depth or 6)
+    topk = int(req.topk or 8)
+    if not req.adaptive:
         search_start = time.perf_counter()
-        try:
-            for step_simulations in simulation_steps:
-                mcts_move, mcts_san, mcts_root_debug = _best_move_with_mcts(
-                    model,
-                    board,
-                    _get_device(),
-                    step_simulations,
-                    include_diagnostics=True,
-                    cumulative=True,
-                )
-                mcts_safety = _move_safety_flags(board, mcts_move)
-                step_confident = _mcts_confident_enough(
-                    fast_move=fast_move,
-                    mcts_move=mcts_move,
-                    root_debug=mcts_root_debug,
-                    safety_flags=mcts_safety,
-                    light=light_budget,
-                    current_simulations=step_simulations,
-                )
-                mcts_attempts.append({
-                    'sims': step_simulations,
-                    'move': mcts_move,
-                    'san': mcts_san,
-                    'safety': mcts_safety,
-                    'confident': step_confident,
-                    'root': mcts_root_debug[:5],
-                })
-                safe_fallback = _safe_candidate_fallback(board, candidates) if _has_safety_risk(mcts_safety) else None
-                if safe_fallback is not None and safe_fallback[0] != mcts_move:
-                    rejected_safety_reasons = [key for key, value in mcts_safety.items() if value]
-                    if _has_later_simulation_step(step_simulations, simulation_steps):
-                        logger.info(
-                            f"/fastmove MCTS safety risk move={mcts_move}; "
-                            f"retrying with higher budget | risks={rejected_safety_reasons}"
-                        )
-                        continue
+        move, value, candidates = _policy_move(model, board, topk)
+        total_ms = _elapsed_ms(total_start)
+        return {
+            'move': move.uci(),
+            'san': board.san(move),
+            'source': 'fast_policy',
+            'value': value,
+            'candidates': candidates[:topk],
+            'adaptive': {'depth': depth, 'simulations': 0, 'history': with_history},
+            'timing_ms': {'validate': validate_ms, 'search': _elapsed_ms(search_start), 'total': total_ms},
+        }
 
-                    move, san, _fallback_safety = safe_fallback
-                    logger.warning(
-                        f"/fastmove MCTS rejected safety risk move={mcts_move}; "
-                        f"fallback={move} | risks={rejected_safety_reasons}"
-                    )
-                    source = 'adaptive_mcts_rejected_safety'
-                    confidence_stop = True
-                    break
-
-                move, san = mcts_move, mcts_san
-                source = 'adaptive_mcts_confident' if step_confident else 'adaptive_mcts'
-                if step_confident or step_simulations == simulation_steps[-1]:
-                    confidence_stop = step_confident
-                    break
-        except Exception:
-            logger.exception("/fastmove adaptive MCTS failed; falling back to fast policy")
-        search_ms = _elapsed_ms(search_start)
-        # Rungs are cumulative on one shared tree, so the work done is the highest rung reached.
-        simulation_total = max((int(attempt.get('sims', 0)) for attempt in mcts_attempts), default=0)
-
-    final_safety = _move_safety_flags(board, move)
-    if _has_safety_risk(final_safety):
-        safe_fallback = _safe_candidate_fallback(board, candidates)
-        if safe_fallback is not None and safe_fallback[0] != move:
-            rejected_safety_reasons = [key for key, value in final_safety.items() if value]
-            logger.warning(
-                f"/fastmove final move rejected safety risk move={move}; "
-                f"fallback={safe_fallback[0]} | risks={rejected_safety_reasons}"
-            )
-            move, san, final_safety = safe_fallback
-            source = f"{source}_safety_fallback"
-
+    budget = float(req.time_budget_sec or FASTMOVE_TIME_BY_DEPTH.get(depth, 2.0))
+    cap = int(req.max_simulations) if req.max_simulations else FASTMOVE_DEFAULT_MAX_SIMULATIONS
+    search_start = time.perf_counter()
+    result = _run_mcts(model, board, _get_device(), cap, time_limit_sec=budget, cumulative=True)
+    search_ms = _elapsed_ms(search_start)
+    move = result['best_move']
+    proven = int(result.get('completed_simulations') or 0) == 0 and float(result.get('root_value', 0.0)) == 1.0
+    root_visits = int(sum(result.get('visit_counts', {}).values()))
     total_ms = _elapsed_ms(total_start)
-
-    decision_debug = {
-        'raw_policy_top': raw_policy_top[:5],
-        'fast_scores': fast_score_debug,
-        'mcts_root': mcts_root_debug[:5],
-        'mcts_attempts': mcts_attempts,
-    }
     logger.info(
-        f"/fastmove DECISION_DEBUG | raw_policy_top={decision_debug['raw_policy_top']} | "
-        f"fast_scores={decision_debug['fast_scores']} | mcts_root={decision_debug['mcts_root']}"
+        f"/fastmove | move={move.uci()} | source={'mate_proof' if proven else 'mcts'} | "
+        f"value={float(result.get('root_value', 0.0)):+.3f} | root_visits={root_visits} | "
+        f"new={result.get('completed_simulations')} | retained={result.get('retained_visits')} | "
+        f"history={with_history} | budget={budget:.2f}s | search_ms={search_ms} | total_ms={total_ms}"
     )
-
-    logger.info(
-        f"/fastmove TIMING | move={move} | source={source} | validate_ms={validate_ms} | "
-        f"predict_ms={predict_ms} | rank_ms={rank_ms} | search_ms={search_ms} | "
-        f"total_ms={total_ms} | candidates={len(candidates)} | complexity={complexity} | "
-        f"adaptive_search={use_adaptive_search} | decisive_fast={decisive_fast_choice} | "
-        f"light_adaptive={light_adaptive_search} | sims={simulations} | steps={simulation_steps} | "
-        f"sim_total={simulation_total} | confidence_stop={confidence_stop} | reasons={adaptive_reasons} | "
-        f"final_safety={final_safety} | rejected_safety={rejected_safety_reasons}"
-    )
-
     return {
-        'move': move,
-        'san': san,
-        'source': source,
-        'value': float(value),
-        'candidates': candidates[:5],
+        'move': move.uci(),
+        'san': board.san(move),
+        'source': 'mate_proof' if proven else 'mcts',
+        'value': float(result.get('root_value', 0.0)),
+        'candidates': _root_candidates(result, topk),
         'adaptive': {
-            'depth': int(req.depth or 6),
-            'complexity': complexity,
-            'reasons': adaptive_reasons,
-            'search': use_adaptive_search,
-            'decisive_fast': decisive_fast_choice,
-            'light_adaptive': light_adaptive_search,
-            'simulations': simulations,
-            'simulation_steps': simulation_steps,
-            'simulation_total': simulation_total,
-            'confidence_stop': confidence_stop,
-            'max_simulations': req.max_simulations,
-            'final_safety': final_safety,
-            'rejected_safety': rejected_safety_reasons,
+            'depth': depth,
+            'time_budget_sec': budget,
+            'max_simulations': cap,
+            'simulations': int(result.get('completed_simulations') or 0),
+            'retained_visits': int(result.get('retained_visits') or 0),
+            'root_visits': root_visits,
+            'history': with_history,
         },
-        'diagnostics': decision_debug,
-        'timing_ms': {
-            'validate': validate_ms,
-            'predict': predict_ms,
-            'rank': rank_ms,
-            'search': search_ms,
-            'total': total_ms,
-        },
+        'timing_ms': {'validate': validate_ms, 'search': search_ms, 'total': total_ms},
     }
 
 

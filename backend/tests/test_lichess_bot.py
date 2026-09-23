@@ -660,36 +660,35 @@ def test_queenless_low_material_position_is_endgame():
     assert _is_endgame_position(chess.Board()) is False
 
 
-def test_critical_position_uses_full_requested_simulation_budget():
-    class _Model:
-        def predict(self, board, device=None):
-            return object(), 0.0
+class _RecordingEngine:
+    """Engine stand-in: records what the bot asked the search for."""
 
-    class _Engine:
-        model = _Model()
-        device = "cpu"
+    device = "cpu"
 
-    candidates = [
-        {"uci": "e2e4", "score": 1000.0, "prob": 0.8},
-        {"uci": "d2d4", "score": 900.0, "prob": 0.2},
-    ]
-    bot = LichessBot(bot_cfg=BotConfig(token="test"), engine=_Engine())
+    def __init__(self, move="d2d4"):
+        self.calls = []
+        self.move = move
 
-    with (
-        patch("app.cli.lichess_bot._legal_moves_with_probs", return_value=candidates),
-        patch("app.cli.lichess_bot._fast_policy_move", return_value=("e2e4", "e4", candidates)),
-        patch("app.cli.lichess_bot._fastmove_complexity", return_value=(1, [])),
-        patch("app.cli.lichess_bot._is_decisive_fast_choice", return_value=True),
-        patch(
-            "app.cli.lichess_bot._best_move_with_mcts",
-            return_value=("d2d4", "d4", [{"uci": "d2d4", "visits": 128}]),
-        ) as mock_mcts,
-    ):
-        move = bot._compute_move_sync(chess.Board(), 128, 10.0, "critical")
+        class _Model:
+            def predict(inner, board, device=None):
+                return object(), 0.0
 
+        self.model = _Model()
+
+    def analyze(self, board, add_noise=False, num_simulations=32, temperature=0.1, time_limit_sec=None):
+        from app.core.engine import AnalysisResult
+        self.calls.append({"num_simulations": num_simulations, "time_limit_sec": time_limit_sec})
+        return AnalysisResult(chess.Move.from_uci(self.move), 0.1, {self.move: num_simulations}, {self.move: 1.0})
+
+
+def test_critical_position_gets_one_search_with_the_full_budget():
+    engine = _RecordingEngine("d2d4")
+    bot = LichessBot(bot_cfg=BotConfig(token="test"), engine=engine)
+    move = bot._compute_move_sync(chess.Board(), 128, 10.0, "critical")
     assert move == "d2d4"
-    mock_mcts.assert_called_once()
-    assert mock_mcts.call_args.args[3] == 128
+    assert len(engine.calls) == 1
+    assert engine.calls[0]["num_simulations"] == 128
+    assert engine.calls[0]["time_limit_sec"] == pytest.approx(9.5)
 
 
 def test_cli_arg_parser():
@@ -722,3 +721,41 @@ def test_get_api_token():
     with patch.dict("os.environ", {}, clear=True), patch("app.cli.lichess_bot.load_env_file"):
         with pytest.raises(ValueError, match="LICHESS_BOT_TOKEN"):
             get_api_token()
+
+
+@pytest.mark.asyncio
+async def test_bot_still_moves_when_it_could_claim_a_threefold():
+    """is_game_over(claim_draw=True) is already true when a repeating move exists; the bot
+    returned without moving there and lost on time."""
+    bot = LichessBot(bot_cfg=BotConfig(token="test_token"), engine=_MockEngine(best_move=chess.Move.from_uci("e7e5")))
+    posted = []
+
+    async def fake_post(session, game_id, move_uci):
+        posted.append(move_uci)
+        return True
+
+    bot.post_move_with_retry = fake_post
+    shuffle = "g1f3 g8f6 f3g1 f6g8 g1f3 g8f6 f3g1"  # ...Ng8 would repeat the start a third time
+    board = chess.Board()
+    for uci in shuffle.split():
+        board.push_uci(uci)
+    assert board.is_game_over(claim_draw=True) and not board.is_repetition(3)
+    state = {"moves": shuffle, "wtime": 60000, "btime": 60000, "winc": 0, "binc": 0}
+    await bot._process_game_turn(MagicMock(), "g1", state, chess.BLACK, last_moved_ply=-1)
+    assert posted == ["e7e5"]
+
+
+@pytest.mark.asyncio
+async def test_bot_does_not_move_after_an_actual_threefold():
+    bot = LichessBot(bot_cfg=BotConfig(token="test_token"), engine=_MockEngine(best_move=chess.Move.from_uci("e2e4")))
+    posted = []
+
+    async def fake_post(session, game_id, move_uci):
+        posted.append(move_uci)
+        return True
+
+    bot.post_move_with_retry = fake_post
+    state = {"moves": "g1f3 g8f6 f3g1 f6g8 g1f3 g8f6 f3g1 f6g8", "wtime": 60000, "btime": 60000, "winc": 0, "binc": 0}
+    await bot._process_game_turn(MagicMock(), "g1", state, chess.WHITE, last_moved_ply=-1)
+    assert posted == []
+

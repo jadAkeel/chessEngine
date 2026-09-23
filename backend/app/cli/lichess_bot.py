@@ -23,21 +23,7 @@ from app.infra.device import select_device
 from app.infra.logging import setup_logging
 from app.api.main import (
     _fast_policy_move,
-    _fastmove_complexity,
-    _is_decisive_fast_choice,
-    _should_use_adaptive_search,
-    _is_light_adaptive_search,
-    _adaptive_simulation_steps,
-    _best_move_with_mcts,
-    _mcts_confident_enough,
-    _move_safety_flags,
-    _has_safety_risk,
-    _safe_candidate_fallback,
     _legal_moves_with_probs,
-    COMPLEX_TOPK_BOOST_THRESHOLD,
-    COMPLEX_TOPK_MAX,
-    MIN_ADAPTIVE_SIMULATIONS,
-    MID_PROBE_RUNG,
 )
 
 logger = setup_logging("cli.lichess_bot")
@@ -88,11 +74,29 @@ def get_api_token() -> str:
 
 # Below this per-move budget a search cannot finish its first batch; play the policy move.
 MIN_CLOCK_SEARCH_SEC = 0.35
+# Clock held back from the allocation for network latency to the Lichess server.
+LATENCY_RESERVE_SEC = 0.3
+# Share of the move budget given to the search deadline; the rest covers the final
+# screen and posting the move.
+SEARCH_BUDGET_FRACTION = 0.95
 
 
-def _estimated_moves_to_go(board: chess.Board) -> int:
-    """Horizon for spreading the remaining clock: long early, never below 20 moves."""
-    return max(20, 50 - int(board.fullmove_number))
+# Increments at least this large pay for the fixed per-move cost (inference + latency).
+COVERING_INCREMENT_SEC = 0.7
+
+
+def _estimated_moves_to_go(board: chess.Board, increment_sec: float = 0.0) -> int:
+    """Moves the remaining clock must cover.
+
+    With a real increment every move refills part of the clock, so the horizon
+    can shrink to 15. Without one the fixed cost of each move (inference and
+    network latency) is never refunded and games can run long, so keep a longer
+    horizon (measured: no flag up to ~100 moves in 5+0 with 0.3 s overruns).
+    """
+    moves_played = max(0, int(board.fullmove_number) - 1)
+    if float(increment_sec) >= COVERING_INCREMENT_SEC:
+        return max(15, 40 - moves_played)
+    return max(30, 50 - moves_played)
 
 
 def calculate_dynamic_thinking(
@@ -101,14 +105,13 @@ def calculate_dynamic_thinking(
     increment_sec: float = 0.0,
     max_sims: int = 256,
 ) -> tuple[int, float, str]:
-    """
-    Dynamically adjusts MCTS simulations and thinking time budget based on:
-    1. Forced moves (1 legal move -> instant).
-    2. Tactical criticality (check, queen attack, high captures).
-    3. Remaining clock budget (spend more when time is luxurious, conserve when low).
+    """Return ``(simulation cap, time budget, urgency)`` for the next move.
 
-    The simulation count is a cap; the search itself observes the time budget as a
-    cooperative deadline, so with a healthy clock the cap is simply ``max_sims``.
+    The budget spreads the usable clock over the expected remaining moves plus
+    most of the increment, scaled by how sharp the position is. The search
+    treats it as a deadline and stops earlier by itself once its choice is
+    settled, so the simulation cap stays at ``max_sims``; the time spent is what
+    the position needs, and unspent time returns to the clock.
     """
     legal_moves = list(board.legal_moves)
     num_legal = len(legal_moves)
@@ -119,17 +122,14 @@ def calculate_dynamic_thinking(
 
     # 2. Criticality analysis
     is_check = board.is_check()
-    captures = [m for m in legal_moves if board.is_capture(m)]
-    captures_count = len(captures)
+    captures_count = sum(1 for m in legal_moves if board.is_capture(m))
 
-    # Check if our queen is attacked
-    queen_under_attack = False
-    for q_sq in board.pieces(chess.QUEEN, board.turn):
-        if board.is_attacked_by(not board.turn, q_sq):
-            queen_under_attack = True
-            break
+    queen_under_attack = any(
+        board.is_attacked_by(not board.turn, q_sq) for q_sq in board.pieces(chess.QUEEN, board.turn)
+    )
 
-    # Check if opponent has an immediate checkmate threat
+    # Does the opponent threaten mate in one? (The side to move is not in check here,
+    # so passing the move is legal for python-chess.)
     opponent_threatens_mate = False
     if not is_check:
         opp_board = board.copy(stack=False)
@@ -139,50 +139,30 @@ def calculate_dynamic_thinking(
             if not opp_board.gives_check(opp_move):
                 continue
             opp_board.push(opp_move)
-            if opp_board.is_checkmate():
-                opponent_threatens_mate = True
-                opp_board.pop()
-                break
+            mated = opp_board.is_checkmate()
             opp_board.pop()
+            if mated:
+                opponent_threatens_mate = True
+                break
 
-    # Determine urgency level: 'critical', 'sharp', 'normal', 'quiet'
     if is_check or queen_under_attack or opponent_threatens_mate:
-        urgency = "critical"
-        urgency_multiplier = 1.8
+        urgency, urgency_multiplier = "critical", 1.8
     elif captures_count >= 3:
-        urgency = "sharp"
-        urgency_multiplier = 1.3
+        urgency, urgency_multiplier = "sharp", 1.3
     elif captures_count == 0 and num_legal <= 8:
-        urgency = "quiet"
-        urgency_multiplier = 0.75
+        urgency, urgency_multiplier = "quiet", 0.75
     else:
-        urgency = "normal"
-        urgency_multiplier = 1.0
+        urgency, urgency_multiplier = "normal", 1.0
 
-    # 3. Base time allocation: spread the clock over the expected remaining moves
-    #    (a long horizon early, at least 20 moves later) plus most of the increment.
-    moves_to_go = _estimated_moves_to_go(board)
-    base_allocated = (time_left_sec / moves_to_go) + (increment_sec * 0.8)
-    allocated_time = base_allocated * urgency_multiplier
-    # Never burn more than a quarter of the remaining clock on one move, and keep
-    # a one-second reserve for network latency once the clock gets low.
-    if time_left_sec > 5.0:
-        max_safe = max(0.1, min(time_left_sec * 0.25, time_left_sec - 1.0))
-    else:
-        max_safe = max(0.05, time_left_sec * 0.15)
-    allocated_time = min(allocated_time, max_safe)
+    # 3. Budget
+    usable = max(0.0, float(time_left_sec) - LATENCY_RESERVE_SEC)
+    base = usable / _estimated_moves_to_go(board, increment_sec) + max(0.0, float(increment_sec)) * 0.8
+    allocated = base * urgency_multiplier
+    # Never more than a quarter of the clock on one move, and far less once it is low.
+    cap_fraction = 0.25 if time_left_sec > 5.0 else 0.15
+    allocated = min(allocated, max(0.05, float(time_left_sec) * cap_fraction))
 
-    # 4. Simulation cap: the deadline governs; only a low clock needs a hard cap.
-    if time_left_sec < 5.0:
-        sims = 16
-    elif time_left_sec < 15.0:
-        sims = 24 if urgency != "critical" else 32
-    elif time_left_sec < 30.0:
-        sims = min(max_sims, 48 if urgency != "critical" else 64)
-    else:
-        sims = max_sims
-
-    return max(1, sims), max(0.05, allocated_time), urgency
+    return max(1, int(max_sims)), max(0.05, allocated), urgency
 
 
 def compute_time_allocation(
@@ -536,7 +516,10 @@ class LichessBot:
                     logger.error("Game %s: Invalid move %s in move string", game_id, uci_move)
 
         current_ply = len(board.move_stack)
-        if board.turn != bot_color or board.is_game_over(claim_draw=True):
+        # Only a position that has actually ended stops us. is_game_over(claim_draw=True)
+        # is also true when a repeating move merely exists; the bot then never moved and
+        # lost on time. Whether to repeat is the search's decision.
+        if board.turn != bot_color or board.is_game_over(claim_draw=False) or board.is_repetition(3):
             return last_moved_ply
 
         if current_ply <= last_moved_ply:
@@ -620,6 +603,15 @@ class LichessBot:
         allocated_time_sec: float,
         urgency: str = "normal",
     ) -> str | None:
+        """Pick a move within ``allocated_time_sec``.
+
+        One time-bounded search. The engine keeps its tree between moves, so the
+        visits already spent on the opponent's actual reply carry over, and the
+        search stops by itself once the remaining budget cannot change its
+        choice. Its result is final apart from the proven-mate / dropped-material
+        screen; heuristic flags never overrule it. The policy move (with the same
+        screen) is used only when the clock leaves no room for a search.
+        """
         legal_moves = list(board.legal_moves)
         if not legal_moves:
             return None
@@ -629,148 +621,43 @@ class LichessBot:
 
         started = time.monotonic()
         budget = max(0.05, float(allocated_time_sec))
-
-        def remaining() -> float:
-            return budget - (time.monotonic() - started)
-
-        if num_simulations >= 180:
-            depth = 8
-        elif num_simulations >= 120:
-            depth = 7
-        elif num_simulations >= 64:
-            depth = 5
-        elif num_simulations >= 32:
-            depth = 4
-        else:
-            depth = 2
-
         try:
-            import torch
-            with torch.no_grad():
-                logits, _ = self.engine.model.predict(board, device=self.engine.device)
+            if budget < MIN_CLOCK_SEARCH_SEC or int(num_simulations) <= 1:
+                return self._policy_move(board, budget, started)
 
-            raw_policy_top = _legal_moves_with_probs(board, logits, 8)
-            fast_move, fast_san, candidates = _fast_policy_move(board, logits, 8, raw_policy_top)
-            complexity, adaptive_reasons = _fastmove_complexity(board, candidates)
-
-            if complexity >= COMPLEX_TOPK_BOOST_THRESHOLD:
-                raw_policy_top = _legal_moves_with_probs(board, logits, COMPLEX_TOPK_MAX)
-                fast_move, fast_san, candidates = _fast_policy_move(board, logits, COMPLEX_TOPK_MAX, raw_policy_top)
-
-            decisive_fast = _is_decisive_fast_choice(board, candidates, adaptive_reasons)
-            if urgency == "critical" and num_simulations >= 32:
-                decisive_fast = False
-                complexity = max(complexity, 4)
-                adaptive_reasons.append("critical_position_urgency")
-
-            endgame_position = _is_endgame_position(board)
-            if endgame_position:
-                decisive_fast = False
-                complexity = max(complexity, 4)
-                adaptive_reasons.append("endgame_position")
-
-            full_adaptive = bool(
-                not decisive_fast
-                and (
-                    urgency == "critical"
-                    or endgame_position
-                    or _should_use_adaptive_search(complexity, adaptive_reasons, depth)
-                )
+            analysis = self.engine.analyze(
+                board=board,
+                num_simulations=max(1, int(num_simulations)),
+                temperature=0.0,
+                time_limit_sec=budget * SEARCH_BUDGET_FRACTION,
             )
-            light_adaptive = bool(
-                not full_adaptive
-                and not decisive_fast
-                and _is_light_adaptive_search(complexity, adaptive_reasons, depth)
+            move = analysis.best_move
+            if move is None or move not in board.legal_moves:
+                raise RuntimeError("search returned no legal move")
+
+            # The search already screened its choice; repeat the screen without a
+            # deadline in case the in-search screen ran out of time.
+            by_visits = sorted(analysis.visit_counts.items(), key=lambda item: -int(item[1]))
+            ranked = [move] + [
+                candidate for candidate in (chess.Move.from_uci(uci) for uci, _ in by_visits)
+                if candidate != move and candidate in board.legal_moves
+            ]
+            screened, _rejected = select_safe_move(board, ranked, root_value=float(analysis.score))
+            if screened is not None and screened != move:
+                logger.warning("Post-search screen replaced %s with %s", move.uci(), screened.uci())
+                move = screened
+            logger.info(
+                "Search chose %s | visits=%d | value=%+.3f | %.2fs of %.2fs budget (%s)",
+                move.uci(),
+                sum(int(v) for v in analysis.visit_counts.values()),
+                float(analysis.score),
+                time.monotonic() - started,
+                budget,
+                urgency,
             )
-            # Clock time is only useful if it is spent: with a real per-move budget the
-            # search always runs (the deadline bounds it), and the bare policy move is
-            # reserved for a nearly exhausted clock.
-            clock_search = bool(num_simulations > 16 and budget >= MIN_CLOCK_SEARCH_SEC)
-            if clock_search and not (full_adaptive or light_adaptive):
-                adaptive_reasons.append("clock_budget_available")
-            use_adaptive = bool((full_adaptive or light_adaptive or clock_search) and num_simulations > 16)
-            light_budget = bool(not full_adaptive)
-
-            if not use_adaptive:
-                logger.info("FastMove selected: %s (%s) [Fast Policy / Decisive | Complexity=%d | Elapsed=%.3fs]",
-                            fast_move, fast_san, complexity, time.monotonic() - started)
-                return fast_move
-
-            if urgency == "critical":
-                simulation_steps = [max(1, num_simulations)]
-            elif decisive_fast:
-                # A clearly winning capture still gets a cheap search-based sanity check.
-                simulation_steps = [min(max(1, num_simulations), MIN_ADAPTIVE_SIMULATIONS)]
-            else:
-                simulation_steps = _adaptive_simulation_steps(
-                    depth, complexity, num_simulations, light=light_budget
-                )
-                if clock_search and simulation_steps and simulation_steps[-1] < num_simulations:
-                    simulation_steps.append(int(num_simulations))
-            if not simulation_steps:
-                return fast_move
-
-            chosen_move = fast_move
-            for step_sims in simulation_steps:
-                time_left = remaining()
-                if time_left <= 0.02 and chosen_move:
-                    logger.info("Time budget reached; playing %s before %d sims", chosen_move, step_sims)
-                    break
-
-                # Rungs are cumulative: the shared search tree keeps the visits of the
-                # previous rung, so climbing the ladder only adds the missing rollouts.
-                mcts_move, mcts_san, mcts_root_debug = _best_move_with_mcts(
-                    self.engine.model,
-                    board,
-                    self.engine.device,
-                    step_sims,
-                    include_diagnostics=True,
-                    time_limit_sec=max(0.05, time_left * 0.9),
-                    cumulative=True,
-                )
-                mcts_safety = _move_safety_flags(board, mcts_move)
-                step_confident = _mcts_confident_enough(
-                    fast_move=fast_move,
-                    mcts_move=mcts_move,
-                    root_debug=mcts_root_debug,
-                    safety_flags=mcts_safety,
-                    light=light_budget,
-                    current_simulations=step_sims,
-                )
-                # With clock to spare, agreement after the first small rung is not a
-                # reason to stop; keep climbing until at least the mid rung.
-                if clock_search and step_sims < MID_PROBE_RUNG and remaining() > 0.3:
-                    step_confident = False
-
-                safe_fallback = _safe_candidate_fallback(board, candidates) if _has_safety_risk(mcts_safety) else None
-                if safe_fallback is not None and safe_fallback[0] != mcts_move:
-                    rejected = [k for k, v in mcts_safety.items() if v]
-                    if any(s > step_sims for s in simulation_steps) and remaining() > 0.1:
-                        logger.info("Safety risk on %s (%s); climbing simulation ladder to resolve...", mcts_move, rejected)
-                        continue
-                    chosen_move = safe_fallback[0]
-                    logger.warning("Safety fallback chose %s to prevent %s", chosen_move, rejected)
-                    break
-                if _has_safety_risk(mcts_safety) and safe_fallback is None:
-                    rejected = [k for k, v in mcts_safety.items() if v]
-                    logger.warning("No move without critical safety risk; search returned %s with %s", mcts_move, rejected)
-
-                chosen_move = mcts_move
-                if step_confident or step_sims == simulation_steps[-1]:
-                    logger.info("Adaptive search confident with %s (%s) at %d sims | Elapsed=%.3fs",
-                                chosen_move, mcts_san, step_sims, time.monotonic() - started)
-                    break
-
-            final_safety = _move_safety_flags(board, chosen_move)
-            if _has_safety_risk(final_safety):
-                safe_fallback = _safe_candidate_fallback(board, candidates)
-                if safe_fallback is not None and safe_fallback[0] != chosen_move:
-                    chosen_move = safe_fallback[0]
-
-            return chosen_move
-
+            return move.uci()
         except Exception as exc:
-            logger.exception("FastMove adaptive search failed; falling back to engine analysis: %s", exc)
+            logger.exception("Move search failed; falling back to a budgeted engine analysis: %s", exc)
 
         try:
             analysis = self.engine.analyze(
@@ -786,6 +673,23 @@ class LichessBot:
 
         fallback = next(iter(board.legal_moves), None)
         return fallback.uci() if fallback else None
+
+    def _policy_move(self, board: chess.Board, budget: float, started: float) -> str:
+        """Low-clock move: the fast policy ranking, screened for short mates and dropped material."""
+        import torch
+
+        with torch.no_grad():
+            logits, value = self.engine.model.predict(board, device=self.engine.device)
+        raw_policy_top = _legal_moves_with_probs(board, logits, 16)
+        _move, _san, candidates = _fast_policy_move(board, logits, 16, raw_policy_top)
+        ranked = [chess.Move.from_uci(item["uci"]) for item in candidates]
+        ranked += [move for move in board.legal_moves if move not in ranked]
+        remaining = max(0.02, budget - (time.monotonic() - started))
+        root_value = float(value) if isinstance(value, (int, float)) else None
+        chosen, _rejected = select_safe_move(board, ranked, time.monotonic() + remaining * 0.8, root_value=root_value)
+        chosen = chosen or ranked[0]
+        logger.info("Low clock: policy move %s (%.2fs budget)", chosen.uci(), budget)
+        return chosen.uci()
 
     async def auto_seek_loop(self, session: aiohttp.ClientSession) -> None:
         logger.info("Auto-seek active: Will search for rated Blitz matches whenever idle.")

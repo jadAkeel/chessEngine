@@ -1,4 +1,8 @@
-"""Play paired local revision matches using one checkpoint and equal simulations."""
+"""Play paired local revision matches using one checkpoint and equal simulations.
+
+Superseded by scripts/engine_match.py (parallel games, equal-effort budgets with tree
+reuse, Elo interval); kept for reproducing the 2026-09-22 comparison.
+"""
 import argparse
 import json
 import os
@@ -62,7 +66,9 @@ def main(args):
                 board.push_uci(move)
                 node = node.add_variation(board.peek())
             timings = {'before': 0.0, 'after': 0.0}
-            while not board.is_game_over(claim_draw=True) and board.ply() < args.max_plies:
+            # Only real endings: a draw the side to move could merely claim is its own decision.
+            while (not board.is_game_over(claim_draw=False) and not board.is_repetition(3)
+                   and board.halfmove_clock < 100 and board.ply() < args.max_plies):
                 name = white if board.turn else black
                 proc = processes[name]
                 proc.stdin.write(json.dumps({'moves': [m.uci() for m in board.move_stack]}) + '\n')
@@ -83,9 +89,15 @@ def main(args):
                 node.comment = f"{reply['seconds']:.3f} seconds"
                 (out / f'game_{index + 1}.pgn').write_text(str(game), encoding='utf-8')
                 print(json.dumps({'game': index + 1, 'ply': board.ply(), 'side': name, **reply}), flush=True)
-            outcome = board.outcome(claim_draw=True)
-            result = outcome.result() if outcome else '*'
-            termination = outcome.termination.name if outcome else 'PLY_LIMIT_UNFINISHED'
+            outcome = board.outcome(claim_draw=False)
+            if outcome is not None:
+                result, termination = outcome.result(), outcome.termination.name
+            elif board.is_repetition(3):
+                result, termination = '1/2-1/2', 'THREEFOLD_REPETITION'
+            elif board.halfmove_clock >= 100:
+                result, termination = '1/2-1/2', 'FIFTY_MOVES'
+            else:
+                result, termination = '*', 'PLY_LIMIT_UNFINISHED'
             game.headers['Result'] = result
             game.headers['Termination'] = termination
             (out / f'game_{index + 1}.pgn').write_text(str(game), encoding='utf-8')

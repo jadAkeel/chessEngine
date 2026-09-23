@@ -275,41 +275,24 @@ def test_api_search_is_cumulative_across_ladder_rungs():
 
 
 def test_bot_spends_its_clock_on_quiet_positions():
-    from app.cli import lichess_bot as bot_module
+    """Quiet positions get the same deadline-bounded search as sharp ones (the old ladder
+    stopped complex positions at 64 visits and played the bare policy move in quiet ones)."""
     from app.cli.lichess_bot import BotConfig, LichessBot
+    from app.core.engine import AnalysisResult
 
-    class _Model:
-        def predict(self, board, device=None):
-            return object(), 0.0
+    calls = []
 
     class _Engine:
-        model = _Model()
         device = "cpu"
+        model = None
 
-    candidates = [
-        {"uci": "e2e4", "score": 1000.0, "prob": 0.8},
-        {"uci": "d2d4", "score": 700.0, "prob": 0.2},
-    ]
+        def analyze(self, board, add_noise=False, num_simulations=32, temperature=0.1, time_limit_sec=None):
+            calls.append((num_simulations, time_limit_sec))
+            return AnalysisResult(chess.Move.from_uci("d2d4"), 0.0, {"d2d4": 90, "e2e4": 10}, {"d2d4": 1.0})
+
     bot = LichessBot(bot_cfg=BotConfig(token="test"), engine=_Engine())
-    with (
-        patch.object(bot_module, "_legal_moves_with_probs", return_value=candidates),
-        patch.object(bot_module, "_fast_policy_move", return_value=("e2e4", "e4", candidates)),
-        patch.object(bot_module, "_fastmove_complexity", return_value=(0, [])),
-        patch.object(bot_module, "_is_decisive_fast_choice", return_value=False),
-        patch.object(bot_module, "_should_use_adaptive_search", return_value=False),
-        patch.object(bot_module, "_is_light_adaptive_search", return_value=False),
-        patch.object(
-            bot_module, "_best_move_with_mcts",
-            return_value=("d2d4", "d4", [{"uci": "d2d4", "visits": 128}]),
-        ) as mock_mcts,
-    ):
-        move = bot._compute_move_sync(chess.Board(), 128, 5.0, "normal")
-    assert move == "d2d4"
-    assert mock_mcts.call_count >= 1
-    last = mock_mcts.call_args_list[-1]
-    assert last.args[3] == 128
-    assert last.kwargs["cumulative"] is True
-    assert 0.0 < last.kwargs["time_limit_sec"] <= 4.5
+    assert bot._compute_move_sync(chess.Board(), 128, 5.0, "quiet") == "d2d4"
+    assert calls == [(128, pytest.approx(4.75))]
 
 
 def test_bot_plays_policy_move_only_when_the_clock_is_nearly_gone():
@@ -324,39 +307,69 @@ def test_bot_plays_policy_move_only_when_the_clock_is_nearly_gone():
         model = _Model()
         device = "cpu"
 
+        def analyze(self, **kwargs):
+            raise AssertionError("no search on a nearly empty clock")
+
     candidates = [{"uci": "e2e4", "score": 1000.0, "prob": 0.9}, {"uci": "d2d4", "score": 500.0, "prob": 0.1}]
     bot = LichessBot(bot_cfg=BotConfig(token="test"), engine=_Engine())
     with (
         patch.object(bot_module, "_legal_moves_with_probs", return_value=candidates),
         patch.object(bot_module, "_fast_policy_move", return_value=("e2e4", "e4", candidates)),
-        patch.object(bot_module, "_fastmove_complexity", return_value=(0, [])),
-        patch.object(bot_module, "_is_decisive_fast_choice", return_value=False),
-        patch.object(bot_module, "_should_use_adaptive_search", return_value=False),
-        patch.object(bot_module, "_is_light_adaptive_search", return_value=False),
-        patch.object(bot_module, "_best_move_with_mcts") as mock_mcts,
     ):
-        assert bot._compute_move_sync(chess.Board(), 16, 0.2, "normal") == "e2e4"
-    mock_mcts.assert_not_called()
+        assert bot._compute_move_sync(chess.Board(), 256, 0.2, "normal") == "e2e4"
+
+
+def test_bot_low_clock_policy_move_is_screened_for_mate():
+    """Even the bare policy move must not walk into a mate the screen can prove."""
+    from app.cli import lichess_bot as bot_module
+    from app.cli.lichess_bot import BotConfig, LichessBot
+
+    class _Model:
+        def predict(self, board, device=None):
+            return object(), 0.0
+
+    class _Engine:
+        model = _Model()
+        device = "cpu"
+
+    board = chess.Board()
+    board.push_san("f3")
+    board.push_san("e5")
+    candidates = [{"uci": "g2g4", "score": 1000.0, "prob": 0.9}, {"uci": "e2e4", "score": 10.0, "prob": 0.1}]
+    bot = LichessBot(bot_cfg=BotConfig(token="test"), engine=_Engine())
+    with (
+        patch.object(bot_module, "_legal_moves_with_probs", return_value=candidates),
+        patch.object(bot_module, "_fast_policy_move", return_value=("g2g4", "g4", candidates)),
+    ):
+        assert bot._compute_move_sync(board, 256, 0.2, "normal") != "g2g4"  # g4?? allows Qh4#
 
 
 def test_clock_allocation_spreads_time_and_lets_the_deadline_govern_simulations():
-    from app.cli.lichess_bot import calculate_dynamic_thinking
+    from app.cli.lichess_bot import LATENCY_RESERVE_SEC, MIN_CLOCK_SEARCH_SEC, calculate_dynamic_thinking
 
     board = chess.Board()
     sims, allocated, urgency = calculate_dynamic_thinking(board, 180.0, 2.0, max_sims=256)
     assert urgency == "normal"
     assert sims == 256
-    assert allocated == pytest.approx(180.0 / 49 + 1.6, rel=0.01)
+    assert allocated == pytest.approx((180.0 - LATENCY_RESERVE_SEC) / 40 + 1.6, rel=0.01)
+    _, no_inc, _ = calculate_dynamic_thinking(board, 300.0, 0.0, max_sims=256)
+    assert no_inc == pytest.approx((300.0 - LATENCY_RESERVE_SEC) / 50, rel=0.01)
 
     late = chess.Board()
     late.fullmove_number = 60
-    _, late_alloc, _ = calculate_dynamic_thinking(late, 40.0, 0.0, max_sims=256)
-    assert late_alloc == pytest.approx(2.0, rel=0.01)  # never below a 20-move horizon
+    sims_late, late_alloc, _ = calculate_dynamic_thinking(late, 40.0, 0.0, max_sims=256)
+    assert sims_late == 256  # no simulation caps: the deadline governs
+    assert late_alloc == pytest.approx((40.0 - LATENCY_RESERVE_SEC) / 30, rel=0.01)  # no increment: >= 30-move horizon
+    _, late_inc_alloc, _ = calculate_dynamic_thinking(late, 40.0, 2.0, max_sims=256)
+    assert late_inc_alloc == pytest.approx((40.0 - LATENCY_RESERVE_SEC) / 15 + 1.6, rel=0.01)  # increment: >= 15
 
-    sims_low, alloc_low, _ = calculate_dynamic_thinking(board, 4.0, 0.0, max_sims=256)
-    assert sims_low == 16
-    assert alloc_low <= 0.6
+    _, alloc_low, _ = calculate_dynamic_thinking(board, 4.0, 0.0, max_sims=256)
+    assert alloc_low < MIN_CLOCK_SEARCH_SEC  # policy move territory
+    _, alloc_low_inc, _ = calculate_dynamic_thinking(board, 4.0, 2.0, max_sims=256)
+    assert alloc_low_inc == pytest.approx(0.6)  # increment helps, capped at 15% of a low clock
 
     only = chess.Board("k7/8/1K6/8/8/8/8/7R b - - 0 1")
     assert len(list(only.legal_moves)) == 1
     assert calculate_dynamic_thinking(only, 100.0, 0.0)[2] == "forced_move"
+
+

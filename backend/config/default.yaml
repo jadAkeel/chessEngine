@@ -67,13 +67,18 @@ mcts:
   classical_value_alpha: 0.35
   resign_threshold: -0.965
   min_resign_plies: 60
+  # Upper bound; with batch_growth each search starts at 4 and grows toward it.
   inference_batch_size: 16
+  batch_growth: true
   virtual_loss: 1.0
   fpu_reduction: 0.25
   reuse_tree: true
   queen_blunder_penalty: 0.85
   queen_hanging_penalty: 0.62
   queen_sac_compensation_threshold: 900
+  # Checks are forcing: the 2-ply exchange estimate behind the tactical penalty is least
+  # reliable there, and penalising checking sacrifices hid forced mates (2/11 -> 5/11).
+  queen_check_discount: 0.0
   piece_penalties:
     PAWN:
       blunder_penalty: 0.08
