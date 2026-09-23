@@ -24,7 +24,7 @@ Same checkpoint throughout. Reproduce from `backend/` with `$env:PYTHONPATH = ".
 5. **Root move choice** uses a KataGo-style lower confidence bound (`value − lcb_scale/√N`, among moves with ≥ 15 % of the top move's visits), plus smart pruning (stop when the top move cannot be overtaken; requires the LCB top move to equal the visit top move).
 6. **Batch size.** A fixed inference batch of 16 made small searches (64–128 sims) too flat. The batch now grows with the search: `clamp(visits // 16, 4, 16)` (`mcts.batch_growth`).
 7. **Tree reuse without history.** The API sent only a FEN, so reuse never worked there. Reuse now also finds the new position by FEN up to 2 plies below the old root, with penalties reset for position-matched subtrees. Self-play never reuses.
-8. **Won bare-king endings.** K+Q / K+R vs K get a graded value (king to the edge, kings close) so the search converts instead of shuffling (`mcts.mopup_endgames`).
+8. **Won bare-king endings.** K+Q / K+R vs K get a graded value (king to the edge, kings close) instead of the network's flat ≈ 0.85, so the search has a direction (`mcts.mopup_endgames`). Measured effect in §2: faster K+Q mates, and all K+R test positions mated (one is a fifty-move draw without it).
 
 ### Penalty
 
@@ -86,24 +86,40 @@ Max output difference 8e-5.
 
 No flag in 3+2 or 1+1 up to 120 moves. 5+0 flags only past move 107 if every move spends its full budget.
 
-### Endgame conversion (real net, 64 sims, mop-up on)
+### Endgame conversion (real net, 64 sims, both sides the same engine)
 
-| Start | Result |
-| --- | --- |
-| K+Q vs K `8/8/8/4k3/8/8/8/KQ6` | mate in 23 plies |
-| K+Q vs K `8/8/3k4/8/8/2K5/8/6Q1` | mate in 27 plies |
+Plies to mate from the start position; a game ends at mate, stalemate, threefold or the fifty-move rule.
+
+| Start (strong side to move) | Mop-up on | Mop-up off |
+| --- | ---: | ---: |
+| K+Q `8/8/8/4k3/8/8/8/KQ6 w` | 23 | 41 |
+| K+Q `8/8/3k4/8/8/2K5/8/6Q1 w` | 27 | 47 |
+| K+Q `4k3/8/8/8/8/8/8/4K2Q w` | 19 | 19 |
+| K+Q `8/8/8/3k4/8/8/8/Q3K3 w` | 21 | 21 |
+| K+Q `8/2k5/8/8/8/8/5K2/7Q w` | 25 | 25 |
+| K+Q `q6k/8/8/8/4K3/8/8/8 b` | 27 | 43 |
+| K+R `8/8/8/4k3/8/8/8/KR6 w` | 83 | 59 |
+| K+R `8/8/3k4/8/8/3K4/8/7R w` | 79 | 67 |
+| K+R `8/8/8/8/3k4/8/8/R3K3 w` | 77 | 59 |
+| K+R `8/8/2k5/8/8/8/5K2/7R w` | 39 | 69 |
+| K+R `7R/8/8/4k3/8/8/1K6/8 w` | 39 | **fifty-move draw** |
+| K+R `8/3k4/8/8/8/8/R7/6K1 w` | 45 | 81 |
+| K+R `8/8/8/8/4k3/8/8/K6R w` | 73 | 55 |
+| K+R `r6k/8/8/8/4K3/8/8/8 b` | 33 | 71 |
+
+Mop-up is never slower in K+Q and mates in about half the plies in 3 of 6. In K+R it is mixed per position (slower in 4 of 8) but it mates in all 8, averaging 58.5 plies, while without it one K+R position is a fifty-move draw and the 7 mates average 66 plies. A first run on only the first two K+R positions suggested restricting mop-up to K+Q; the wider test shows that would lose the drawn position, so mop-up stays on for both. The net alone does convert most basic endings; the 09-22 game 3 non-conversion was a more complex ending.
 
 ### Match: new search (B) vs the 09-22 commit (A)
 
 `scripts/engine_match.py`, 64 sims, `--budget topup` (a reused tree is topped up to the budget, not given it on top, so neither side gets extra visits), openings from the GM PGN, colours swapped per pair, resign adjudication only when both engines agree (|v| ≥ 0.92 for 3 moves).
 
-Interim result, 14 games (7 complete opening pairs; the 60-game run was still going when this was committed):
+Stopped after 17 of the planned 60 games, when master was fast-forwarded to this code (side A ran from the master checkout, so later games would no longer have been the 09-22 code):
 
 | | Games | B wins | Draws | B losses | Mean root visits / move (A · B) |
 | --- | ---: | ---: | ---: | ---: | --- |
-| B (new) vs A (09-22) | 14 | 14 (12 mate, 2 adjudicated) | 0 | 0 | 62.9 · 49.1 |
+| B (new) vs A (09-22) | 17 | 17 (14 mate, 3 adjudicated) | 0 | 0 | 62.9 · 49.2 |
 
-Every opening pair was won 2–0; counting each pair as one coin flip, p ≈ 0.008. B wins while using fewer visits (smart pruning stops early). The losing side's value drops gradually in these games, with no single-move collapse, so this is being outplayed, not a crash or harness fault. The Elo point estimate is unbounded at a 100 % score and is not meaningful; what this shows is that the new search is clearly stronger at 64 sims, not by how much.
+All 8 complete opening pairs were won 2–0 (plus one game of a ninth pair); counting each pair as one coin flip, p ≈ 0.004. B wins while using fewer visits (smart pruning stops early). The losing side's value drops gradually in these games, with no single-move collapse, so this is being outplayed, not a crash or harness fault. The Elo point estimate is unbounded at a 100 % score and is not meaningful; what this shows is that the new search is clearly stronger at 64 sims, not by how much.
 
 ### Mutation check
 
