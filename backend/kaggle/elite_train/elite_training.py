@@ -31,6 +31,10 @@ BUFFER_SIZE = os.environ.get("TRAIN_BUFFER_SIZE", "3000000")
 MAX_SAMPLES = os.environ.get("TRAIN_MAX_SAMPLES", "20000000")
 BATCH_SIZE = os.environ.get("TRAIN_BATCH_SIZE", "128")
 DEVICE = os.environ.get("TRAIN_DEVICE", "cuda")
+# "both" = zip in the kernel output + a new version of the checkpoint dataset
+# after every iteration. Old versions are kept so any iteration can be picked.
+AUTOSAVE = os.environ.get("TRAIN_AUTOSAVE", "both")
+CHECKPOINT_DATASET_ID = os.environ.get("TRAIN_CHECKPOINT_DATASET", "jadakil/external-model-checkpoints")
 MIN_DATASET_SAMPLES = int(os.environ.get("TRAIN_MIN_DATASET_SAMPLES", "20000000"))
 
 
@@ -177,7 +181,8 @@ def main() -> None:
 
     print(
         f"[PLAN] iterations={ITERATIONS} steps_per_iter={TRAIN_STEPS_PER_ITER} "
-        f"buffer={BUFFER_SIZE} max_samples={MAX_SAMPLES} device={DEVICE}",
+        f"buffer={BUFFER_SIZE} max_samples={MAX_SAMPLES} device={DEVICE} "
+        f"autosave={AUTOSAVE} -> {CHECKPOINT_DATASET_ID}",
         flush=True,
     )
     print(f"[PLAN] dataset_samples={total_samples}", flush=True)
@@ -192,9 +197,10 @@ def main() -> None:
             "--batch-size", BATCH_SIZE,
             "--device", DEVICE,
             "--install-requirements",
-            # Keep checkpoints in the kernel output. Versioning the checkpoint
-            # dataset here would publish unevaluated weights before the Arena gate.
-            "--autosave", "local",
+            "--autosave", AUTOSAVE,
+            "--autosave-every", "1",
+            "--kaggle-dataset-id", CHECKPOINT_DATASET_ID,
+            # Old dataset versions are deliberately kept so every iteration can be picked.
         ],
         cwd=local_code,
     )

@@ -115,10 +115,14 @@ def test_training_kernel_finds_code_at_any_depth(tmp_path: Path, relative: str):
     assert kernel.find_code_root(tmp_path / "input") == base
 
 
-def test_training_kernel_keeps_checkpoints_local_until_arena():
-    """Autosaving to the checkpoint dataset would publish weights before the Arena gate."""
+def test_training_kernel_autosaves_every_iteration_and_keeps_versions():
+    """Each iteration becomes its own dataset version so any checkpoint can be picked."""
+    kernel = _load_kernel_module()
     source = KERNEL_SCRIPT.read_text(encoding="utf-8")
-    assert '"--autosave", "local"' in source
+    assert kernel.AUTOSAVE == "both"
+    assert kernel.CHECKPOINT_DATASET_ID == "jadakil/external-model-checkpoints"
+    assert '"--autosave-every", "1"' in source
+    assert "--delete-old-versions" not in source.split("def main")[1], "old versions must be kept"
     assert "ensure_dependencies()" in source.split("def main")[1], "deps must install before training"
 
 
