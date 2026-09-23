@@ -726,6 +726,11 @@ class LichessBot:
                             max_auto_rating = self.bot_cfg.max_rating or 1850
                             if isinstance(blitz_rating, (int, float)) and blitz_rating > max_auto_rating:
                                 continue
+                            min_auto_rating = self.bot_cfg.min_rating
+                            if min_auto_rating is not None and (
+                                not isinstance(blitz_rating, (int, float)) or blitz_rating < min_auto_rating
+                            ):
+                                continue
                             if bid and bid != self.bot_id.lower() and not bid.startswith("leela"):
                                 if self._failed_targets.get(bid, 0) < now:
                                     online_ids.append(bid)

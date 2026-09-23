@@ -318,6 +318,37 @@ async def test_bot_accept_and_decline_challenge():
 
 
 @pytest.mark.asyncio
+async def test_auto_seek_only_challenges_bots_inside_rating_window():
+    bot = LichessBot(bot_cfg=BotConfig(token="test_token", min_rating=1550, max_rating=2100))
+    bot.bot_id = "me"
+
+    online = [
+        {"id": "weak", "perfs": {"blitz": {"rating": 1200}}},
+        {"id": "unrated", "perfs": {}},
+        {"id": "toostrong", "perfs": {"blitz": {"rating": 2400}}},
+        {"id": "target", "perfs": {"blitz": {"rating": 1750}}},
+    ]
+    list_resp = MagicMock()
+    list_resp.status = 200
+    list_resp.text = AsyncMock(return_value="\n".join(json.dumps(b) for b in online))
+    list_resp.__aenter__ = AsyncMock(return_value=list_resp)
+    list_resp.__aexit__ = AsyncMock(return_value=None)
+
+    chal_resp = MagicMock()
+    chal_resp.status = 200
+    chal_resp.__aenter__ = AsyncMock(return_value=chal_resp)
+    chal_resp.__aexit__ = AsyncMock(return_value=None)
+
+    session = MagicMock()
+    session.get.return_value = list_resp
+    session.post.return_value = chal_resp
+
+    assert await bot._challenge_random_online_bot(session) is True
+    challenged = [call.args[0].rsplit("/", 1)[-1] for call in session.post.call_args_list]
+    assert challenged == ["target"]
+
+
+@pytest.mark.asyncio
 async def test_bot_game_stream_and_move_submission(tmp_path: Path):
     bot_cfg = BotConfig(token="test_token")
     mock_engine = _MockEngine(best_move=chess.Move.from_uci("e2e4"))
