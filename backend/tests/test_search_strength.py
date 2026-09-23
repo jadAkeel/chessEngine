@@ -351,7 +351,8 @@ def test_clock_allocation_spreads_time_and_lets_the_deadline_govern_simulations(
     sims, allocated, urgency = calculate_dynamic_thinking(board, 180.0, 2.0, max_sims=256)
     assert urgency == "normal"
     assert sims == 256
-    assert allocated == pytest.approx((180.0 - LATENCY_RESERVE_SEC) / 40 + 1.6, rel=0.01)
+    # 45-move horizon; normal moves leave 10 increments (20 s) on the clock.
+    assert allocated == pytest.approx((180.0 - LATENCY_RESERVE_SEC - 20.0) / 45 + 1.6, rel=0.01)
     _, no_inc, _ = calculate_dynamic_thinking(board, 300.0, 0.0, max_sims=256)
     assert no_inc == pytest.approx((300.0 - LATENCY_RESERVE_SEC) / 50, rel=0.01)
 
@@ -361,7 +362,14 @@ def test_clock_allocation_spreads_time_and_lets_the_deadline_govern_simulations(
     assert sims_late == 256  # no simulation caps: the deadline governs
     assert late_alloc == pytest.approx((40.0 - LATENCY_RESERVE_SEC) / 30, rel=0.01)  # no increment: >= 30-move horizon
     _, late_inc_alloc, _ = calculate_dynamic_thinking(late, 40.0, 2.0, max_sims=256)
-    assert late_inc_alloc == pytest.approx((40.0 - LATENCY_RESERVE_SEC) / 15 + 1.6, rel=0.01)  # increment: >= 15
+    assert late_inc_alloc == pytest.approx((40.0 - LATENCY_RESERVE_SEC - 20.0) / 30 + 1.6, rel=0.01)  # increment: >= 30
+
+    # A critical move late in a long game may spend the reserve the normal moves kept.
+    critical = chess.Board("4k3/8/8/8/8/8/4r3/4K3 w - - 0 60")  # white king in check
+    _, critical_alloc, critical_urgency = calculate_dynamic_thinking(critical, 40.0, 2.0, max_sims=256)
+    assert critical_urgency == "critical"
+    assert critical_alloc == pytest.approx(((40.0 - LATENCY_RESERVE_SEC) / 30 + 1.6) * 1.8, rel=0.01)
+    assert critical_alloc > 2 * late_inc_alloc
 
     _, alloc_low, _ = calculate_dynamic_thinking(board, 4.0, 0.0, max_sims=256)
     assert alloc_low < MIN_CLOCK_SEARCH_SEC  # policy move territory

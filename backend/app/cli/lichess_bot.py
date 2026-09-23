@@ -84,19 +84,32 @@ SEARCH_BUDGET_FRACTION = 0.95
 # Increments at least this large pay for the fixed per-move cost (inference + latency).
 COVERING_INCREMENT_SEC = 0.7
 
+# With an increment, ordinary moves leave this many increments on the clock so
+# critical positions late in long games still get a real search.
+INCREMENT_RESERVE_MOVES = 10
+
 
 def _estimated_moves_to_go(board: chess.Board, increment_sec: float = 0.0) -> int:
     """Moves the remaining clock must cover.
 
-    With a real increment every move refills part of the clock, so the horizon
-    can shrink to 15. Without one the fixed cost of each move (inference and
-    network latency) is never refunded and games can run long, so keep a longer
-    horizon (measured: no flag up to ~100 moves in 5+0 with 0.3 s overruns).
+    With a real increment every move refills part of the clock, but games
+    against stronger opponents run past move 100; a 15-move floor spent the
+    clock by move 60 (3+2, lost a 157-move game on the increment alone), so the
+    floor is 30. Without an increment the fixed cost of each move (inference and
+    network latency) is never refunded, so keep a longer horizon (measured: no
+    flag up to ~100 moves in 5+0 with 0.3 s overruns).
     """
     moves_played = max(0, int(board.fullmove_number) - 1)
     if float(increment_sec) >= COVERING_INCREMENT_SEC:
-        return max(15, 40 - moves_played)
+        return max(30, 45 - moves_played)
     return max(30, 50 - moves_played)
+
+
+def _clock_reserve(increment_sec: float, urgency: str) -> float:
+    """Clock that normal/quiet moves must not spend; sharp and critical ones may."""
+    if float(increment_sec) < COVERING_INCREMENT_SEC or urgency not in ("normal", "quiet"):
+        return 0.0
+    return INCREMENT_RESERVE_MOVES * float(increment_sec)
 
 
 def calculate_dynamic_thinking(
@@ -155,7 +168,7 @@ def calculate_dynamic_thinking(
         urgency, urgency_multiplier = "normal", 1.0
 
     # 3. Budget
-    usable = max(0.0, float(time_left_sec) - LATENCY_RESERVE_SEC)
+    usable = max(0.0, float(time_left_sec) - LATENCY_RESERVE_SEC - _clock_reserve(increment_sec, urgency))
     base = usable / _estimated_moves_to_go(board, increment_sec) + max(0.0, float(increment_sec)) * 0.8
     allocated = base * urgency_multiplier
     # Never more than a quarter of the clock on one move, and far less once it is low.
