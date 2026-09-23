@@ -310,3 +310,17 @@ def test_verify_requires_manifest(tmp_path: Path):
     ok, report = verify(tmp_path, cfg, min_samples=1, split_sample_size=10, skip_hashes=True)
     assert not ok
     assert any("manifest" in failure for failure in report["failures"])
+
+
+def test_verify_split_sampling_does_not_pin_whole_shards():
+    """Regression: views into a shard kept every shard alive and OOM-killed Kaggle."""
+    from scripts.verify_dataset import sample_detached_states
+
+    shard = np.ones((1000, 20, 8, 8), dtype=np.float16)
+    picked = sample_detached_states(shard, step=100)
+
+    assert len(picked) == 10
+    for state in picked:
+        assert state.base is None, "sampled state must be a copy, not a view into the shard"
+        assert state.shape == (20, 8, 8)
+    assert sum(state.nbytes for state in picked) == 10 * 20 * 8 * 8 * 2

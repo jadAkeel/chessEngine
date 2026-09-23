@@ -113,3 +113,36 @@ def test_training_kernel_finds_code_at_any_depth(tmp_path: Path, relative: str):
     (base / "scripts").mkdir()
 
     assert kernel.find_code_root(tmp_path / "input") == base
+
+
+def test_training_kernel_keeps_checkpoints_local_until_arena():
+    """Autosaving to the checkpoint dataset would publish weights before the Arena gate."""
+    source = KERNEL_SCRIPT.read_text(encoding="utf-8")
+    assert '"--autosave", "local"' in source
+    assert "ensure_dependencies()" in source.split("def main")[1], "deps must install before training"
+
+
+def test_refuses_to_train_from_scratch(tmp_path: Path):
+    kernel = _load_kernel_module()
+    (tmp_path / "input" / "chess-elite-21m").mkdir(parents=True)
+    with pytest.raises(SystemExit) as excinfo:
+        kernel.assert_checkpoint_attached(tmp_path / "input")
+    assert "refusing to train from scratch" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("name", ["external_latest_checkpoint.pth", "external_best_model.pth"])
+def test_finds_attached_checkpoint_at_any_depth(tmp_path: Path, name: str):
+    kernel = _load_kernel_module()
+    ckpt = tmp_path / "input" / "datasets" / "jadakil" / "external-model-checkpoints" / name
+    ckpt.parent.mkdir(parents=True)
+    ckpt.write_bytes(b"weights")
+    assert kernel.assert_checkpoint_attached(tmp_path / "input") == ckpt
+
+
+def test_prefers_latest_over_best_checkpoint(tmp_path: Path):
+    kernel = _load_kernel_module()
+    base = tmp_path / "input" / "external-model-checkpoints"
+    base.mkdir(parents=True)
+    (base / "external_best_model.pth").write_bytes(b"best")
+    (base / "external_latest_checkpoint.pth").write_bytes(b"latest")
+    assert kernel.assert_checkpoint_attached(tmp_path / "input").name == "external_latest_checkpoint.pth"

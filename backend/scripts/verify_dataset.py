@@ -52,6 +52,16 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def sample_detached_states(states: np.ndarray, step: int) -> list[np.ndarray]:
+    """Take every ``step``-th state as an independent copy.
+
+    ``np.ascontiguousarray`` on a row of a contiguous array returns a view, and
+    a view keeps its whole shard (~320 MB at 125k samples) alive. Keeping a few
+    views per shard across 173 shards exhausted memory on Kaggle.
+    """
+    return [states[i].copy() for i in range(0, len(states), max(1, int(step)))]
+
+
 def verify(shards_dir: Path, cfg, *, min_samples: int, split_sample_size: int, skip_hashes: bool) -> tuple[bool, dict]:
     failures: list[str] = []
     manifest_path = shards_dir / MANIFEST_NAME
@@ -133,7 +143,8 @@ def verify(shards_dir: Path, cfg, *, min_samples: int, split_sample_size: int, s
                 failures.append(f"{empty} all-zero states in {name}")
 
             step = max(1, n // want_per_shard)
-            split_states.extend(np.ascontiguousarray(states[i]) for i in range(0, n, step))
+            split_states.extend(sample_detached_states(states, step))
+            del block, states, policy_indices, values, data
 
         total += n
         month = entry.get("month", "unknown")

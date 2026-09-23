@@ -97,6 +97,50 @@ def assert_dataset_is_large_enough(root: Path | None = None, minimum: int | None
     return best_total
 
 
+def assert_checkpoint_attached(root: Path | None = None) -> Path:
+    """Refuse to train from scratch: the run must resume the existing model.
+
+    kaggle_train_external.py only warns and starts from random weights when no
+    checkpoint is found, which would silently discard the trained model.
+    """
+    root = INPUT_ROOT if root is None else Path(root)
+    for name in ("external_latest_checkpoint.pth", "external_best_model.pth"):
+        found = sorted(root.rglob(name))
+        if found:
+            for path in found:
+                print(f"[CHECKPOINT] found {path} ({path.stat().st_size} bytes)", flush=True)
+            return found[0]
+    raise SystemExit(
+        "No external_latest_checkpoint.pth or external_best_model.pth under /kaggle/input; "
+        "refusing to train from scratch. Attach the checkpoint dataset."
+    )
+
+
+def ensure_dependencies() -> None:
+    """Install what the Kaggle image lacks (it ships without python-chess).
+
+    Must run before kaggle_train_external.py, whose interpreter probe requires
+    ``import chess`` to succeed.
+    """
+    import subprocess
+
+    required = {"chess": "chess", "yaml": "PyYAML", "zstandard": "zstandard"}
+    missing = []
+    for module, package in required.items():
+        try:
+            __import__(module)
+        except ImportError:
+            missing.append(package)
+    if not missing:
+        print("[DEPS] all present", flush=True)
+        return
+    print(f"[DEPS] installing {missing}", flush=True)
+    result = subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", *missing])
+    if result.returncode != 0:
+        raise SystemExit(f"pip install failed for {missing}")
+    print("[DEPS] installed", flush=True)
+
+
 def run_script(script: Path, argv: list[str], cwd: Path) -> None:
     """Run a project script in this interpreter (avoids interpreter mismatch)."""
     import runpy
@@ -127,6 +171,9 @@ def main() -> None:
     print(f"[CODE] working copy at {local_code}", flush=True)
 
     total_samples = assert_dataset_is_large_enough()
+    checkpoint = assert_checkpoint_attached()
+    print(f"[PLAN] resuming from {checkpoint}", flush=True)
+    ensure_dependencies()
 
     print(
         f"[PLAN] iterations={ITERATIONS} steps_per_iter={TRAIN_STEPS_PER_ITER} "
@@ -145,6 +192,9 @@ def main() -> None:
             "--batch-size", BATCH_SIZE,
             "--device", DEVICE,
             "--install-requirements",
+            # Keep checkpoints in the kernel output. Versioning the checkpoint
+            # dataset here would publish unevaluated weights before the Arena gate.
+            "--autosave", "local",
         ],
         cwd=local_code,
     )

@@ -30,8 +30,9 @@ def _backend_dir() -> Path:
 def _resolve_python() -> str:
     """Pick an interpreter that can actually import the training dependencies.
 
-    On Kaggle ``sys.executable`` can point at /usr/bin/python3, which does not
-    carry the image's site-packages, so spawning it fails on ``import chess``.
+    Probing beats trusting ``sys.executable``: a subprocess that cannot import
+    chess would otherwise fail only after setup work. The Kaggle image ships
+    without python-chess, so install it before calling this.
     """
     override = os.environ.get("CHESS_TRAIN_PYTHON")
     candidates = [override] if override else []

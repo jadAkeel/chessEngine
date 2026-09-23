@@ -24,6 +24,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 CODE_INCLUDES = ("app", "config", "scripts")
+# kaggle_train_external.py --install-requirements reads this from the backend root.
+CODE_FILE_INCLUDES = ("requirements2_kaggle.txt",)
 CODE_ARCHIVE_STEM = "chess_engine_code"
 CODE_EXCLUDES = shutil.ignore_patterns(
     "__pycache__", "*.pyc", "*.pyo", ".pytest_cache", "*.npz", "*.pth", "*.zip", "*.log",
@@ -65,6 +67,11 @@ def build_code_payload(build_dir: Path, username: str, slug: str, title: str) ->
         if not source.exists():
             raise FileNotFoundError(f"Missing expected code directory: {source}")
         shutil.copytree(source, staging / name, ignore=CODE_EXCLUDES)
+    for name in CODE_FILE_INCLUDES:
+        source = ROOT / name
+        if not source.exists():
+            raise FileNotFoundError(f"Missing expected code file: {source}")
+        shutil.copy2(source, staging / name)
 
     archive = shutil.make_archive(str(code_dir / CODE_ARCHIVE_STEM), "zip", root_dir=staging)
     shutil.rmtree(staging)

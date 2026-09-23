@@ -42,6 +42,7 @@ def test_code_payload_contains_generator_and_encoders(tmp_path: Path):
         "app/game/move_encoding.py",
         "app/infra/config.py",
         "config/default.yaml",
+        "requirements2_kaggle.txt",
     ):
         assert expected in names, f"missing {expected} from payload"
 
