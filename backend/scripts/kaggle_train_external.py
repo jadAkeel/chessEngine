@@ -224,8 +224,13 @@ def _copy_checkpoint_inputs(args: argparse.Namespace) -> str | None:
                 shutil.copy2(src, dst)
                 print(f"[CHECKPOINT] copied {src} -> {dst}", flush=True)
         latest = save_dir / "external_latest_checkpoint.pth"
+        best = save_dir / "external_best_model.pth"
         if base_model is None and latest.exists():
             base_model = str(latest)
+        elif base_model is None and best.exists():
+            # A best-model-only dataset must still resume, not train from scratch.
+            base_model = str(best)
+            print(f"[CHECKPOINT] no latest checkpoint; resuming from best model {best}", flush=True)
 
     if base_model and not Path(base_model).exists():
         raise FileNotFoundError(f"Base model not found: {base_model}")
@@ -452,15 +457,22 @@ def main() -> None:
             if args.autosave in {"local", "both"}:
                 _autosave_local(save_dir, autosave_dir, iteration)
             if args.autosave in {"kaggle", "both"}:
-                _autosave_kaggle(
-                    save_dir,
-                    autosave_dir,
-                    args.kaggle_dataset_id,
-                    dataset_title,
-                    iteration,
-                    delete_old_versions=bool(args.delete_old_versions),
-                    env=env,
-                )
+                try:
+                    _autosave_kaggle(
+                        save_dir,
+                        autosave_dir,
+                        args.kaggle_dataset_id,
+                        dataset_title,
+                        iteration,
+                        delete_old_versions=bool(args.delete_old_versions),
+                        env=env,
+                    )
+                except (RuntimeError, FileNotFoundError, OSError) as exc:
+                    # With a local archive already written, a failed upload must
+                    # not abort hours of remaining training.
+                    if args.autosave != "both":
+                        raise
+                    print(f"[AUTOSAVE] Kaggle upload failed, local archive kept: {exc}", flush=True)
 
     print("[DONE] Kaggle external training finished", flush=True)
 

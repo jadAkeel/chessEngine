@@ -25,7 +25,8 @@ CODE_DIR_NAME = os.environ.get("CHESS_CODE_DIR", "chess-engine-code")
 INPUT_ROOT = Path(os.environ.get("KAGGLE_INPUT_ROOT", "/kaggle/input"))
 WORKING_ROOT = Path(os.environ.get("KAGGLE_WORKING_ROOT", "/kaggle/working"))
 
-ITERATIONS = os.environ.get("TRAIN_ITERATIONS", "10")
+# 9 iterations (~66 min each plus uploads) stay clear of the 12 h Kaggle limit.
+ITERATIONS = os.environ.get("TRAIN_ITERATIONS", "9")
 TRAIN_STEPS_PER_ITER = os.environ.get("TRAIN_STEPS_PER_ITER", "10000")
 BUFFER_SIZE = os.environ.get("TRAIN_BUFFER_SIZE", "3000000")
 MAX_SAMPLES = os.environ.get("TRAIN_MAX_SAMPLES", "20000000")
@@ -34,7 +35,9 @@ DEVICE = os.environ.get("TRAIN_DEVICE", "cuda")
 # "both" = zip in the kernel output + a new version of the checkpoint dataset
 # after every iteration. Old versions are kept so any iteration can be picked.
 AUTOSAVE = os.environ.get("TRAIN_AUTOSAVE", "both")
-CHECKPOINT_DATASET_ID = os.environ.get("TRAIN_CHECKPOINT_DATASET", "jadakil/external-model-checkpoints")
+# v3 resumes from the v2 iteration-9 model and versions this dataset, leaving
+# the original external-model-checkpoints untouched.
+CHECKPOINT_DATASET_ID = os.environ.get("TRAIN_CHECKPOINT_DATASET", "jadakil/chess-elite-checkpoints")
 MIN_DATASET_SAMPLES = int(os.environ.get("TRAIN_MIN_DATASET_SAMPLES", "20000000"))
 
 

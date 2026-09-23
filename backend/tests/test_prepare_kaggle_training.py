@@ -120,7 +120,8 @@ def test_training_kernel_autosaves_every_iteration_and_keeps_versions():
     kernel = _load_kernel_module()
     source = KERNEL_SCRIPT.read_text(encoding="utf-8")
     assert kernel.AUTOSAVE == "both"
-    assert kernel.CHECKPOINT_DATASET_ID == "jadakil/external-model-checkpoints"
+    assert kernel.CHECKPOINT_DATASET_ID == "jadakil/chess-elite-checkpoints"
+    assert kernel.ITERATIONS == "9"
     assert '"--autosave-every", "1"' in source
     assert "--delete-old-versions" not in source.split("def main")[1], "old versions must be kept"
     assert "ensure_dependencies()" in source.split("def main")[1], "deps must install before training"

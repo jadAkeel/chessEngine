@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kernel-title", type=str, default="Chess Elite Training")
     parser.add_argument("--code-slug", type=str, default="chess-engine-code")
     parser.add_argument("--dataset-slug", type=str, required=True, help="Generated dataset slug, e.g. chess-elite-20m")
-    parser.add_argument("--checkpoint-slug", type=str, default="external-model-checkpoints")
+    parser.add_argument("--checkpoint-slug", type=str, default="chess-elite-checkpoints")
     return parser
 
 

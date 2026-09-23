@@ -10,7 +10,7 @@
   "dataset_sources": [
     "jadakil/chess-engine-code",
     "jadakil/chess-elite-21m",
-    "jadakil/external-model-checkpoints"
+    "jadakil/chess-elite-checkpoints"
   ],
   "competition_sources": [],
   "kernel_sources": []

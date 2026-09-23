@@ -39,6 +39,7 @@ tempCodeRunnerFile.py
 backend/data/
 backend/models/
 backend/checkpoints/
+backend/trained_output/
 **/replay_buffer*/
 **/replay_buffer.d/
 *.pt

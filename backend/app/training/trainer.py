@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -165,6 +167,33 @@ def _smart_horizontal_flip(states, policies):
     return states, policies
 
 
+# A non-finite forward pass still updates BatchNorm running stats, so skipping
+# the optimizer step (what GradScaler does) is not enough: the Kaggle run of
+# 2026-09-23 went NaN mid-iteration and every later evaluation was NaN. Keep a
+# known-good copy of the weights and roll back to it instead.
+GOOD_STATE_EVERY = 500
+PARAM_CHECK_EVERY = 50
+MAX_NONFINITE_STEPS = 200
+
+
+def _params_finite(model) -> bool:
+    checks = [torch.isfinite(t).all() for t in model.state_dict().values() if t.is_floating_point()]
+    return bool(torch.stack(checks).all().item()) if checks else True
+
+
+def _snapshot_good_state(model, optimizer):
+    return (
+        {k: v.detach().clone() for k, v in model.state_dict().items()},
+        copy.deepcopy(optimizer.state_dict()),
+    )
+
+
+def _restore_good_state(model, optimizer, snapshot) -> None:
+    model.load_state_dict(snapshot[0])
+    # load_state_dict may alias same-device tensors; keep the snapshot pristine.
+    optimizer.load_state_dict(copy.deepcopy(snapshot[1]))
+
+
 def train_model(
     model,
     optimizer,
@@ -207,6 +236,19 @@ def train_model(
     enable_hflip = bool(cfg.training.enable_horizontal_flip_augment)
     beta_start = float(cfg.replay.beta_start)
     beta_end = float(cfg.replay.beta_end)
+
+    if not _params_finite(model):
+        raise RuntimeError("Model weights are already non-finite before training; refusing to train")
+    good_state = _snapshot_good_state(model, optimizer)
+    nonfinite_steps = 0
+
+    def _roll_back(reason: str) -> None:
+        nonlocal nonfinite_steps
+        nonfinite_steps += 1
+        _restore_good_state(model, optimizer, good_state)
+        print(f"[TRAIN GUARD] step={step} {reason}; rolled back to last good weights ({nonfinite_steps} so far)")
+        if nonfinite_steps > MAX_NONFINITE_STEPS:
+            raise RuntimeError(f"Training diverged: {nonfinite_steps} non-finite steps in one iteration")
 
     for step in range(total_steps):
         beta = beta_start + (beta_end - beta_start) * min(1.0, global_step / 2000.0)
@@ -269,11 +311,22 @@ def train_model(
             value_loss = (is_weights * per_sample_value).mean()
             loss = policy_loss + value_loss_coeff * value_loss - entropy_coeff * entropy
 
+        if not bool(torch.isfinite(loss).item()):
+            _roll_back("non-finite loss")
+            continue
+
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
         scaler.step(optimizer)
         scaler.update()
+
+        if step % PARAM_CHECK_EVERY == 0:
+            if not _params_finite(model):
+                _roll_back("non-finite weights after optimizer step")
+                continue
+            if step % GOOD_STATE_EVERY == 0:
+                good_state = _snapshot_good_state(model, optimizer)
 
         if scheduler is not None and cfg.training.step_scheduler_per_batch:
             scheduler.step()
@@ -325,6 +378,7 @@ def train_model(
         'steps': len(losses),
         'global_step': global_step,
         'amp_enabled': bool(use_amp),
+        'nonfinite_steps': nonfinite_steps,
     }
 
 

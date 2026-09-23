@@ -73,3 +73,62 @@ def test_written_config_records_training_plan(tmp_path: Path):
     assert data["external"]["validation_split"] == 0.1
     assert data["external"]["dedup"] is True
     assert data["training"]["train_steps_per_iter"] == 10_000
+
+
+def test_best_model_only_dataset_resumes_instead_of_training_from_scratch(tmp_path: Path):
+    """v3 attaches only the v2 iteration-9 best model; it must become the base model."""
+    from scripts.kaggle_train_external import _copy_checkpoint_inputs
+
+    source = tmp_path / "input" / "chess-elite-checkpoints"
+    source.mkdir(parents=True)
+    (source / "external_best_model.pth").write_bytes(b"iter9")
+    args = _args(tmp_path, base_model=None, checkpoint_input_dir=str(source))
+
+    base_model = _copy_checkpoint_inputs(args)
+
+    assert base_model == str(Path(args.save_dir) / "external_best_model.pth")
+    assert Path(base_model).read_bytes() == b"iter9"
+
+
+def test_latest_checkpoint_still_preferred_over_best(tmp_path: Path):
+    from scripts.kaggle_train_external import _copy_checkpoint_inputs
+
+    source = tmp_path / "input" / "ckpts"
+    source.mkdir(parents=True)
+    (source / "external_best_model.pth").write_bytes(b"best")
+    (source / "external_latest_checkpoint.pth").write_bytes(b"latest")
+    args = _args(tmp_path, base_model=None, checkpoint_input_dir=str(source))
+
+    assert Path(_copy_checkpoint_inputs(args)).name == "external_latest_checkpoint.pth"
+
+
+def _run_main_with_failing_upload(monkeypatch, tmp_path: Path, autosave: str) -> list[int]:
+    import sys
+
+    import scripts.kaggle_train_external as kte
+
+    trained = []
+    monkeypatch.setattr(kte, "_train_one_iteration", lambda args, cfg, base, env, it: trained.append(it))
+    monkeypatch.setattr(kte, "_autosave_local", lambda *a, **k: None)
+
+    def failing_upload(*args, **kwargs):
+        raise RuntimeError("Kaggle dataset autosave failed")
+
+    monkeypatch.setattr(kte, "_autosave_kaggle", failing_upload)
+    monkeypatch.setattr(sys, "argv", [
+        "kaggle_train_external.py", "--iterations", "3", "--device", "cpu",
+        "--samples-path", str(tmp_path / "shards"), "--checkpoint-input-dir", "",
+        "--save-dir", str(tmp_path / "ckpt"), "--config-out", str(tmp_path / "cfg.yaml"),
+        "--autosave", autosave, "--kaggle-dataset-id", "jadakil/chess-elite-checkpoints",
+    ])
+    kte.main()
+    return trained
+
+
+def test_failed_kaggle_upload_does_not_abort_training_when_local_copy_exists(monkeypatch, tmp_path: Path):
+    assert _run_main_with_failing_upload(monkeypatch, tmp_path, "both") == [1, 2, 3]
+
+
+def test_failed_kaggle_upload_still_fatal_in_kaggle_only_mode(monkeypatch, tmp_path: Path):
+    with pytest.raises(RuntimeError, match="autosave failed"):
+        _run_main_with_failing_upload(monkeypatch, tmp_path, "kaggle")

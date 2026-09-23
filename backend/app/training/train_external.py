@@ -242,6 +242,15 @@ def main() -> None:
             float(train_stats["loss"]),
             current_val_loss
         )
+        if train_stats.get("nonfinite_steps"):
+            logger.warning("[ITER %s] rolled back %s non-finite steps", current_iter, train_stats["nonfinite_steps"])
+
+        # Never overwrite a good checkpoint with NaN weights (iteration 10 of the
+        # 2026-09-23 Kaggle run did, leaving a corrupt latest checkpoint).
+        if not math.isfinite(current_val_loss) or not math.isfinite(float(train_stats["loss"])):
+            raise RuntimeError(
+                f"Iteration {current_iter} produced a non-finite loss; checkpoints left untouched"
+            )
 
         # ======================================
         # 🔥 SAVE
