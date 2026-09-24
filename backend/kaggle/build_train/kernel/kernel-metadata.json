@@ -13,5 +13,7 @@
     "jadakil/chess-elite-checkpoints"
   ],
   "competition_sources": [],
-  "kernel_sources": []
+  "kernel_sources": [
+    "jadakil/chess-elite-dataset-generation"
+  ]
 }
