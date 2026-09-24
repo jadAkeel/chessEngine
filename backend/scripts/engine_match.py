@@ -306,9 +306,9 @@ def run_match(args) -> None:
     queue = list(pending)
 
     def worker(slot: int) -> None:
-        a = EngineProcess("A", Path(args.a_root), args.a_config, args.a_set, args.model, args.threads,
+        a = EngineProcess("A", Path(args.a_root), args.a_config, args.a_set, args.a_model or args.model, args.threads,
                           out / f"engine_A_{slot}.log", args.budget)
-        b = EngineProcess("B", Path(args.b_root), args.b_config, args.b_set, args.model, args.threads,
+        b = EngineProcess("B", Path(args.b_root), args.b_config, args.b_set, args.b_model or args.model, args.threads,
                           out / f"engine_B_{slot}.log", args.budget)
         try:
             while True:
@@ -359,6 +359,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--a-set", action="append", default=[], help="override for A, e.g. mcts.penalty_mode=offset")
     parser.add_argument("--b-set", action="append", default=[], help="override for B")
     parser.add_argument("--model", default=str((BACKEND / "models" / "best_model.pth").resolve()))
+    parser.add_argument("--a-model", default=None, help="checkpoint for A only (default: --model), to compare weights")
+    parser.add_argument("--b-model", default=None, help="checkpoint for B only (default: --model)")
     parser.add_argument("--games", type=int, default=20)
     parser.add_argument("--simulations", type=int, default=64)
     parser.add_argument("--time-limit", type=float, default=None, help="optional per-move deadline in seconds")
