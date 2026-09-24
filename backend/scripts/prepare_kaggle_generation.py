@@ -15,6 +15,7 @@ is authenticated.
 
 import argparse
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -42,6 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--code-title", type=str, default="Chess Engine Code (dataset generation)")
     parser.add_argument("--kernel-title", type=str, default="Chess Elite Dataset Generation")
     parser.add_argument("--resume-from", type=str, default="", help="Optional previous output dataset, e.g. user/slug")
+    parser.add_argument(
+        "--start-month", type=str, default="",
+        help="Month to generate, e.g. 2025-09 (baked into the kernel; Kaggle kernels take no env vars). "
+        "Use a separate --kernel-slug per month: a kernel's output is replaced on every run.",
+    )
     return parser
 
 
@@ -90,6 +96,18 @@ def build_code_payload(build_dir: Path, username: str, slug: str, title: str) ->
     return code_dir
 
 
+def _bake_start_month(script: Path, month: str) -> None:
+    if not re.fullmatch(r"\d{4}-\d{2}", month):
+        raise ValueError(f"--start-month must look like 2025-09, got {month!r}")
+    source = script.read_text(encoding="utf-8")
+    pattern = r'START_MONTH = os\.environ\.get\("ELITE_START_MONTH", "[0-9-]+"\)'
+    baked, count = re.subn(pattern, f'START_MONTH = os.environ.get("ELITE_START_MONTH", "{month}")', source)
+    if count != 1:
+        raise RuntimeError("Could not find the START_MONTH default in the kernel script")
+    script.write_text(baked, encoding="utf-8")
+    print(f"[KERNEL] start_month={month}")
+
+
 def build_kernel_payload(
     build_dir: Path,
     username: str,
@@ -97,6 +115,7 @@ def build_kernel_payload(
     kernel_title: str,
     code_slug: str,
     resume_from: str,
+    start_month: str = "",
 ) -> Path:
     kernel_dir = build_dir / "kernel"
     if kernel_dir.exists():
@@ -106,6 +125,8 @@ def build_kernel_payload(
     if not KERNEL_SOURCE.exists():
         raise FileNotFoundError(f"Missing kernel script: {KERNEL_SOURCE}")
     shutil.copy2(KERNEL_SOURCE, kernel_dir / KERNEL_SOURCE.name)
+    if start_month:
+        _bake_start_month(kernel_dir / KERNEL_SOURCE.name, start_month)
 
     sources = [f"{username}/{code_slug}"]
     if resume_from:
@@ -146,6 +167,7 @@ def main() -> None:
         args.kernel_title,
         args.code_slug,
         args.resume_from,
+        args.start_month,
     )
 
     print("\n" + "=" * 68)

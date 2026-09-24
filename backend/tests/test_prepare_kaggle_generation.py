@@ -193,3 +193,18 @@ def test_generation_kernel_prefers_code_dataset_over_stale_output_copy(tmp_path:
     _fake_extracted(tmp_path / "input" / "chess-elite-dataset-generation" / "code")
     real = _fake_extracted(tmp_path / "input" / "chess-engine-code" / "nested")
     assert kernel.find_code_root(tmp_path / "input") == real
+
+
+def test_kernel_payload_bakes_requested_month(tmp_path: Path):
+    kernel_dir = build_kernel_payload(
+        tmp_path, "jadakil", "chess-elite-gen-2025-09", "Title", "chess-engine-code", "", "2025-09"
+    )
+    source = (kernel_dir / "elite_dataset_generation.py").read_text(encoding="utf-8")
+    assert 'START_MONTH = os.environ.get("ELITE_START_MONTH", "2025-09")' in source
+    metadata = json.loads((kernel_dir / "kernel-metadata.json").read_text(encoding="utf-8"))
+    assert metadata["id"] == "jadakil/chess-elite-gen-2025-09"
+
+
+def test_kernel_payload_rejects_malformed_month(tmp_path: Path):
+    with pytest.raises(ValueError):
+        build_kernel_payload(tmp_path, "jadakil", "k", "Title", "chess-engine-code", "", "Sept")

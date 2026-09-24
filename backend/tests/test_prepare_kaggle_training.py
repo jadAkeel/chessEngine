@@ -233,3 +233,11 @@ def test_prefers_code_dataset_over_a_kernel_outputs_stale_copy(tmp_path: Path):
     real = fake_code(tmp_path / "input" / "chess-engine-code" / "chess_engine_code")
 
     assert kernel.find_code_root(tmp_path / "input") == real
+
+
+def test_v5_continues_from_latest_checkpoint_by_default():
+    """The user chose to continue from v4 model 7, the checkpoint dataset's latest."""
+    kernel = _load_kernel_module()
+    main_src = KERNEL_SCRIPT.read_text(encoding="utf-8").split("def main")[1]
+    assert kernel.START_FROM == "latest"
+    assert 'if START_FROM == "best"' in main_src
