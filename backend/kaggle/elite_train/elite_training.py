@@ -25,11 +25,12 @@ CODE_DIR_NAME = os.environ.get("CHESS_CODE_DIR", "chess-engine-code")
 INPUT_ROOT = Path(os.environ.get("KAGGLE_INPUT_ROOT", "/kaggle/input"))
 WORKING_ROOT = Path(os.environ.get("KAGGLE_WORKING_ROOT", "/kaggle/working"))
 
-# fp32 iterations are slower; the time budget below stops cleanly before the
-# 12 h Kaggle limit, so ITERATIONS is an upper bound.
+# The user wants runs of at most ~6 h; the budget stops cleanly before an
+# iteration that would overrun it, so ITERATIONS is only an upper bound.
 ITERATIONS = os.environ.get("TRAIN_ITERATIONS", "8")
-TIME_BUDGET_HOURS = os.environ.get("TRAIN_TIME_BUDGET_HOURS", "11.2")
-TRAIN_STEPS_PER_ITER = os.environ.get("TRAIN_STEPS_PER_ITER", "10000")
+TIME_BUDGET_HOURS = os.environ.get("TRAIN_TIME_BUDGET_HOURS", "5.7")
+# Shorter fp32 iterations (~70 min) give several checkpoints to pick from within 6 h.
+TRAIN_STEPS_PER_ITER = os.environ.get("TRAIN_STEPS_PER_ITER", "5000")
 BUFFER_SIZE = os.environ.get("TRAIN_BUFFER_SIZE", "3000000")
 MAX_SAMPLES = os.environ.get("TRAIN_MAX_SAMPLES", "50000000")
 BATCH_SIZE = os.environ.get("TRAIN_BATCH_SIZE", "128")

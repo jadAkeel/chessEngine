@@ -204,7 +204,7 @@ def test_v4_kernel_trains_fp32_with_lower_lr_inside_time_budget():
     main_src = KERNEL_SCRIPT.read_text(encoding="utf-8").split("def main")[1]
     assert kernel.USE_AMP is False
     assert float(kernel.LR) < 0.0006
-    assert 0 < float(kernel.TIME_BUDGET_HOURS) < 12
+    assert 0 < float(kernel.TIME_BUDGET_HOURS) <= 6, "runs are capped at ~6 h"
     for flag in ('"--samples-path"', '"--lr"', '"--time-budget-hours"', '"--no-amp"', '"--base-model"'):
         assert flag in main_src
 
