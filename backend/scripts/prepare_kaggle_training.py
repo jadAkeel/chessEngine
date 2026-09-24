@@ -29,6 +29,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--code-slug", type=str, default="chess-engine-code")
     parser.add_argument("--dataset-slug", type=str, required=True, help="Generated dataset slug, e.g. chess-elite-20m")
     parser.add_argument("--checkpoint-slug", type=str, default="chess-elite-checkpoints")
+    parser.add_argument(
+        "--kernel-source", action="append", default=[],
+        help="Kernel whose output is attached as extra shards, e.g. chess-elite-dataset-generation (repeatable)",
+    )
     return parser
 
 
@@ -40,6 +44,7 @@ def build_training_kernel(
     code_slug: str,
     dataset_slug: str,
     checkpoint_slug: str,
+    kernel_sources: list[str] | None = None,
 ) -> Path:
     kernel_dir = build_dir / "kernel"
     if kernel_dir.exists():
@@ -67,7 +72,9 @@ def build_training_kernel(
         "enable_internet": True,
         "dataset_sources": sources,
         "competition_sources": [],
-        "kernel_sources": [],
+        # A generation kernel's output mounts like a dataset, so a new month
+        # can train without a download and re-upload round trip.
+        "kernel_sources": [f"{username}/{slug}" for slug in (kernel_sources or [])],
     }
     (kernel_dir / "kernel-metadata.json").write_text(
         json.dumps(metadata, indent=2), encoding="utf-8"
@@ -75,7 +82,7 @@ def build_training_kernel(
 
     print(f"[KERNEL] {kernel_dir}")
     print(f"[KERNEL] gpu=True internet=True")
-    for source in sources:
+    for source in sources + metadata["kernel_sources"]:
         print(f"[KERNEL]   attached: {source}")
     return kernel_dir
 
@@ -93,6 +100,7 @@ def main() -> None:
         args.code_slug,
         args.dataset_slug,
         args.checkpoint_slug,
+        args.kernel_source,
     )
 
     print("\n" + "=" * 68)

@@ -25,13 +25,19 @@ CODE_DIR_NAME = os.environ.get("CHESS_CODE_DIR", "chess-engine-code")
 INPUT_ROOT = Path(os.environ.get("KAGGLE_INPUT_ROOT", "/kaggle/input"))
 WORKING_ROOT = Path(os.environ.get("KAGGLE_WORKING_ROOT", "/kaggle/working"))
 
-# 9 iterations (~66 min each plus uploads) stay clear of the 12 h Kaggle limit.
-ITERATIONS = os.environ.get("TRAIN_ITERATIONS", "9")
+# fp32 iterations are slower; the time budget below stops cleanly before the
+# 12 h Kaggle limit, so ITERATIONS is an upper bound.
+ITERATIONS = os.environ.get("TRAIN_ITERATIONS", "8")
+TIME_BUDGET_HOURS = os.environ.get("TRAIN_TIME_BUDGET_HOURS", "11.2")
 TRAIN_STEPS_PER_ITER = os.environ.get("TRAIN_STEPS_PER_ITER", "10000")
 BUFFER_SIZE = os.environ.get("TRAIN_BUFFER_SIZE", "3000000")
-MAX_SAMPLES = os.environ.get("TRAIN_MAX_SAMPLES", "20000000")
+MAX_SAMPLES = os.environ.get("TRAIN_MAX_SAMPLES", "50000000")
 BATCH_SIZE = os.environ.get("TRAIN_BATCH_SIZE", "128")
 DEVICE = os.environ.get("TRAIN_DEVICE", "cuda")
+# fp16 AMP overflowed once trunk activations reached ~18k (v2 iter 10 and v3
+# went NaN), so v4 trains in fp32 with a lower learning rate.
+LR = os.environ.get("TRAIN_LR", "0.0002")
+USE_AMP = os.environ.get("TRAIN_USE_AMP", "0") == "1"
 # "both" = zip in the kernel output + a new version of the checkpoint dataset
 # after every iteration. Old versions are kept so any iteration can be picked.
 AUTOSAVE = os.environ.get("TRAIN_AUTOSAVE", "both")
@@ -102,6 +108,50 @@ def assert_dataset_is_large_enough(root: Path | None = None, minimum: int | None
             "Attach the verified 20M dataset, not the older shard set."
         )
     return best_total
+
+
+def combine_shard_dirs(root: Path | None = None, out_dir: Path | None = None) -> tuple[Path, int]:
+    """Expose every attached shard set (one per month) as one flat folder.
+
+    The trainer reads a single folder, and each generated set names its shards
+    shard_00000.npz..., so they are symlinked under a per-set prefix. Returns
+    the folder and the summed manifest sample count.
+    """
+    root = INPUT_ROOT if root is None else Path(root)
+    out_dir = WORKING_ROOT / "combined_shards" if out_dir is None else Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    total = 0
+    for index, manifest_path in enumerate(sorted(root.rglob("manifest.json"))):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        shards = sorted(manifest_path.parent.glob("shard_*.npz"))
+        if not shards:
+            continue
+        months = "_".join(sorted(manifest.get("months", {}))) or f"set{index}"
+        for shard in shards:
+            link = out_dir / f"{months}_{shard.name}"
+            if not link.exists():
+                try:
+                    link.symlink_to(shard)
+                except OSError:  # Windows without symlink privilege (local tests)
+                    os.link(shard, link)
+        total += int(manifest.get("total_samples", 0))
+        print(f"[DATASET] + {months}: {len(shards)} shards, {manifest.get('total_samples')} samples", flush=True)
+
+    if not total:
+        raise FileNotFoundError("No generated shard sets (manifest.json + shard_*.npz) under /kaggle/input")
+    print(f"[DATASET] combined {total} samples in {out_dir}", flush=True)
+    return out_dir, total
+
+
+def find_best_checkpoint(root: Path | None = None) -> Path | None:
+    """The best model to start from; the dataset's latest may be a worse later iteration."""
+    root = INPUT_ROOT if root is None else Path(root)
+    found = sorted(root.rglob("external_best_model.pth"))
+    return found[0] if found else None
 
 
 def assert_checkpoint_attached(root: Path | None = None) -> Path:
@@ -177,15 +227,17 @@ def main() -> None:
         shutil.copytree(code_root, local_code)
     print(f"[CODE] working copy at {local_code}", flush=True)
 
-    total_samples = assert_dataset_is_large_enough()
-    checkpoint = assert_checkpoint_attached()
-    print(f"[PLAN] resuming from {checkpoint}", flush=True)
+    assert_dataset_is_large_enough()
+    samples_dir, total_samples = combine_shard_dirs()
+    assert_checkpoint_attached()
+    checkpoint = find_best_checkpoint()
+    print(f"[PLAN] starting from best model {checkpoint}", flush=True)
     ensure_dependencies()
 
     print(
         f"[PLAN] iterations={ITERATIONS} steps_per_iter={TRAIN_STEPS_PER_ITER} "
         f"buffer={BUFFER_SIZE} max_samples={MAX_SAMPLES} device={DEVICE} "
-        f"autosave={AUTOSAVE} -> {CHECKPOINT_DATASET_ID}",
+        f"lr={LR} amp={USE_AMP} budget={TIME_BUDGET_HOURS}h autosave={AUTOSAVE} -> {CHECKPOINT_DATASET_ID}",
         flush=True,
     )
     print(f"[PLAN] dataset_samples={total_samples}", flush=True)
@@ -204,6 +256,11 @@ def main() -> None:
             "--autosave-every", "1",
             "--kaggle-dataset-id", CHECKPOINT_DATASET_ID,
             # Old dataset versions are deliberately kept so every iteration can be picked.
+            "--samples-path", str(samples_dir),
+            "--lr", LR,
+            "--time-budget-hours", TIME_BUDGET_HOURS,
+            *([] if USE_AMP else ["--no-amp"]),
+            *(["--base-model", str(checkpoint)] if checkpoint else []),
         ],
         cwd=local_code,
     )

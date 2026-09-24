@@ -89,6 +89,18 @@ COVERING_INCREMENT_SEC = 0.7
 INCREMENT_RESERVE_MOVES = 10
 
 
+def auto_seek_backoff_sec(unanswered: int) -> float:
+    """Seconds between challenges after ``unanswered`` ignored ones in a row.
+
+    Re-challenging every 30 s while no bot in range was accepting sent 102
+    challenges in two hours and got the account rate-limited (429) for the
+    rest of the night, so the wait doubles up to 10 minutes.
+    """
+    if unanswered <= 0:
+        return 30.0
+    return float(min(600.0, 30.0 * 2 ** (unanswered - 1)))
+
+
 def _estimated_moves_to_go(board: chess.Board, increment_sec: float = 0.0) -> int:
     """Moves the remaining clock must cover.
 
@@ -707,13 +719,23 @@ class LichessBot:
     async def auto_seek_loop(self, session: aiohttp.ClientSession) -> None:
         logger.info("Auto-seek active: Will search for rated Blitz matches whenever idle.")
         await asyncio.sleep(5.0)
+        unanswered = 0
         while not self._shutdown_event.is_set():
             try:
                 if not self.active_games and self.games_completed < (self.bot_cfg.max_games or float("inf")):
                     logger.info("Auto-seek: Bot is idle, seeking opponent...")
+                    games_before = self.games_completed
                     sent = await self._challenge_random_online_bot(session)
                     if sent:
                         await asyncio.sleep(30.0)
+                        if self.active_games or self.games_completed != games_before:
+                            unanswered = 0
+                        else:
+                            unanswered += 1
+                            wait = auto_seek_backoff_sec(unanswered) - 30.0
+                            if wait > 0:
+                                logger.info("Auto-seek: %s challenges unanswered, waiting %.0fs", unanswered, wait)
+                                await asyncio.sleep(wait)
                         continue
             except Exception as exc:
                 logger.debug("Auto-seek loop error: %s", exc)

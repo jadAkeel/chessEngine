@@ -132,3 +132,25 @@ def test_failed_kaggle_upload_does_not_abort_training_when_local_copy_exists(mon
 def test_failed_kaggle_upload_still_fatal_in_kaggle_only_mode(monkeypatch, tmp_path: Path):
     with pytest.raises(RuntimeError, match="autosave failed"):
         _run_main_with_failing_upload(monkeypatch, tmp_path, "kaggle")
+
+
+def test_config_can_force_fp32_and_override_lr(tmp_path: Path):
+    path = _write_config(_args(tmp_path, lr=0.0002, no_amp=True))
+    cfg = load_config(str(path))
+    assert cfg.training.lr == pytest.approx(0.0002)
+    assert cfg.training.use_amp is False
+
+
+def test_config_keeps_defaults_when_not_overridden(tmp_path: Path):
+    cfg = load_config(str(_write_config(_args(tmp_path))))
+    assert cfg.training.use_amp is True
+
+
+@pytest.mark.parametrize(
+    "elapsed_h, slowest_h, budget_h, fits",
+    [(0, 0, 11.2, True), (8.0, 2.5, 11.2, True), (9.0, 2.5, 11.2, False), (50, 5, 0, True)],
+)
+def test_time_budget_stops_before_an_iteration_that_cannot_finish(elapsed_h, slowest_h, budget_h, fits):
+    from scripts.kaggle_train_external import _fits_time_budget
+
+    assert _fits_time_budget(elapsed_h * 3600, slowest_h * 3600, budget_h) is fits

@@ -24,7 +24,8 @@ WORKING_ROOT = Path(os.environ.get("KAGGLE_WORKING_ROOT", "/kaggle/working"))
 OUTPUT_DIR = WORKING_ROOT / "prepared_shards"
 WORK_DIR = WORKING_ROOT / "_archives"
 
-START_MONTH = os.environ.get("ELITE_START_MONTH", "2025-11")
+# 2025-11 is published as jadakil/chess-elite-21m; this run adds the month before it.
+START_MONTH = os.environ.get("ELITE_START_MONTH", "2025-10")
 MONTHS = int(os.environ.get("ELITE_MONTHS", "4"))
 TARGET_SAMPLES = int(os.environ.get("ELITE_TARGET_SAMPLES", "21500000"))
 SHARD_SIZE = int(os.environ.get("ELITE_SHARD_SIZE", "125000"))

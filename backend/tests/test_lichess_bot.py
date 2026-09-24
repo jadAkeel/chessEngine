@@ -790,3 +790,11 @@ async def test_bot_does_not_move_after_an_actual_threefold():
     await bot._process_game_turn(MagicMock(), "g1", state, chess.WHITE, last_moved_ply=-1)
     assert posted == []
 
+
+
+def test_auto_seek_backs_off_when_challenges_go_unanswered():
+    from app.cli.lichess_bot import auto_seek_backoff_sec
+
+    waits = [auto_seek_backoff_sec(n) for n in range(0, 8)]
+    assert waits[:6] == [30.0, 30.0, 60.0, 120.0, 240.0, 480.0]
+    assert waits[6] == waits[7] == 600.0, "capped at 10 minutes"

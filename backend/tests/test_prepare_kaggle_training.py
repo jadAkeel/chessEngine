@@ -121,7 +121,7 @@ def test_training_kernel_autosaves_every_iteration_and_keeps_versions():
     source = KERNEL_SCRIPT.read_text(encoding="utf-8")
     assert kernel.AUTOSAVE == "both"
     assert kernel.CHECKPOINT_DATASET_ID == "jadakil/chess-elite-checkpoints"
-    assert kernel.ITERATIONS == "9"
+    assert kernel.ITERATIONS == "8"
     assert '"--autosave-every", "1"' in source
     assert "--delete-old-versions" not in source.split("def main")[1], "old versions must be kept"
     assert "ensure_dependencies()" in source.split("def main")[1], "deps must install before training"
@@ -151,3 +151,69 @@ def test_prefers_latest_over_best_checkpoint(tmp_path: Path):
     (base / "external_best_model.pth").write_bytes(b"best")
     (base / "external_latest_checkpoint.pth").write_bytes(b"latest")
     assert kernel.assert_checkpoint_attached(tmp_path / "input").name == "external_latest_checkpoint.pth"
+
+
+# =========================================
+# V4: COMBINED MONTHS, FP32, BEST-MODEL START
+# =========================================
+
+def _write_month(directory: Path, month: str, shards: int, total: int) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "manifest.json").write_text(
+        json.dumps({"total_samples": total, "months": {month: {"samples": total}}}), encoding="utf-8"
+    )
+    for i in range(shards):
+        (directory / f"shard_{i:05d}.npz").write_bytes(f"{month}-{i}".encode())
+
+
+def test_combines_months_with_clashing_shard_names(tmp_path: Path):
+    kernel = _load_kernel_module()
+    _write_month(tmp_path / "input" / "datasets" / "jadakil" / "chess-elite-21m", "2025-11", 2, 21_512_668)
+    _write_month(tmp_path / "input" / "notebooks" / "gen" / "prepared_shards", "2025-10", 3, 21_400_000)
+
+    out, total = kernel.combine_shard_dirs(tmp_path / "input", tmp_path / "combined")
+
+    names = sorted(p.name for p in out.iterdir())
+    assert names == [
+        "2025-10_shard_00000.npz", "2025-10_shard_00001.npz", "2025-10_shard_00002.npz",
+        "2025-11_shard_00000.npz", "2025-11_shard_00001.npz",
+    ]
+    assert (out / "2025-11_shard_00001.npz").read_bytes() == b"2025-11-1"
+    assert total == 21_512_668 + 21_400_000
+
+
+def test_combine_fails_without_any_shard_set(tmp_path: Path):
+    kernel = _load_kernel_module()
+    (tmp_path / "input").mkdir()
+    with pytest.raises(FileNotFoundError):
+        kernel.combine_shard_dirs(tmp_path / "input", tmp_path / "combined")
+
+
+def test_starts_from_best_model_not_a_later_latest(tmp_path: Path):
+    """The checkpoint dataset's latest (v3 iter 1) scored worse than the best (v2 iter 9)."""
+    kernel = _load_kernel_module()
+    base = tmp_path / "input" / "chess-elite-checkpoints"
+    base.mkdir(parents=True)
+    (base / "external_best_model.pth").write_bytes(b"best")
+    (base / "external_latest_checkpoint.pth").write_bytes(b"latest")
+    assert kernel.find_best_checkpoint(tmp_path / "input").name == "external_best_model.pth"
+
+
+def test_v4_kernel_trains_fp32_with_lower_lr_inside_time_budget():
+    kernel = _load_kernel_module()
+    main_src = KERNEL_SCRIPT.read_text(encoding="utf-8").split("def main")[1]
+    assert kernel.USE_AMP is False
+    assert float(kernel.LR) < 0.0006
+    assert 0 < float(kernel.TIME_BUDGET_HOURS) < 12
+    for flag in ('"--samples-path"', '"--lr"', '"--time-budget-hours"', '"--no-amp"', '"--base-model"'):
+        assert flag in main_src
+
+
+def test_training_kernel_can_attach_generation_kernel_output(tmp_path: Path):
+    kernel_dir = build_training_kernel(
+        tmp_path, "jadakil", "chess-elite-training", "Title",
+        "chess-engine-code", "chess-elite-21m", "chess-elite-checkpoints",
+        ["chess-elite-dataset-generation"],
+    )
+    metadata = json.loads((kernel_dir / "kernel-metadata.json").read_text(encoding="utf-8"))
+    assert metadata["kernel_sources"] == ["jadakil/chess-elite-dataset-generation"]

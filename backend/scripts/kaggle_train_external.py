@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -191,6 +192,9 @@ def _write_config(args: argparse.Namespace) -> Path:
         f"  batch_size: {int(args.batch_size)}",
         f"  epochs: {int(args.epochs)}",
         f"  train_steps_per_iter: {int(args.train_steps_per_iter)}",
+        *([f"  lr: {float(args.lr)}"] if getattr(args, "lr", None) is not None else []),
+        # fp16 AMP overflowed once the trunk activations reached ~18k (v2 iter 10, v3).
+        *(["  use_amp: false"] if getattr(args, "no_amp", False) else []),
         "",
         # ReplayBuffer preallocates replay.capacity upfront, so it must track
         # buffer_size; leaving the default would reserve the full 5M states
@@ -339,6 +343,17 @@ def _autosave_kaggle(
         print(result.stdout, flush=True)
 
 
+def _fits_time_budget(elapsed_sec: float, slowest_iteration_sec: float, budget_hours: float) -> bool:
+    """Whether one more iteration (as slow as the slowest so far) ends inside the budget.
+
+    A Kaggle session killed at its time limit may lose the kernel output, so
+    stopping cleanly beats starting an iteration that cannot finish.
+    """
+    if budget_hours <= 0:
+        return True
+    return elapsed_sec + slowest_iteration_sec <= budget_hours * 3600.0
+
+
 def _train_one_iteration(
     args: argparse.Namespace,
     config_path: Path,
@@ -413,6 +428,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kaggle-dataset-id", default=DEFAULT_KAGGLE_DATASET_ID)
     parser.add_argument("--kaggle-dataset-title", default=None)
     parser.add_argument("--delete-old-versions", action="store_true")
+    parser.add_argument("--lr", type=float, default=None, help="Override training.lr")
+    parser.add_argument("--no-amp", action="store_true", help="Train in fp32 (no fp16 autocast)")
+    parser.add_argument(
+        "--time-budget-hours", type=float, default=0.0,
+        help="Stop before an iteration that would not finish inside this budget (0 = no limit)",
+    )
     return parser
 
 
@@ -449,8 +470,18 @@ def main() -> None:
     print(f"[START] save_dir={save_dir}", flush=True)
     print(f"[START] iterations={args.iterations}", flush=True)
 
+    started = time.monotonic()
+    slowest_iteration = 0.0
     for iteration in range(1, int(args.iterations) + 1):
+        if not _fits_time_budget(time.monotonic() - started, slowest_iteration, args.time_budget_hours):
+            print(
+                f"[LOOP] stopping before iteration {iteration}: another ~{slowest_iteration / 3600:.1f} h "
+                f"would exceed the {args.time_budget_hours} h budget",
+                flush=True,
+            )
+            break
         print(f"[LOOP] iteration {iteration}/{args.iterations}", flush=True)
+        iteration_start = time.monotonic()
         _train_one_iteration(args, config_path, base_model, env, iteration)
 
         if args.autosave != "off" and iteration % int(args.autosave_every) == 0:
@@ -473,6 +504,7 @@ def main() -> None:
                     if args.autosave != "both":
                         raise
                     print(f"[AUTOSAVE] Kaggle upload failed, local archive kept: {exc}", flush=True)
+        slowest_iteration = max(slowest_iteration, time.monotonic() - iteration_start)
 
     print("[DONE] Kaggle external training finished", flush=True)
 
