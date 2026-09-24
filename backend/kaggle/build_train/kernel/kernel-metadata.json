@@ -14,6 +14,7 @@
   ],
   "competition_sources": [],
   "kernel_sources": [
-    "jadakil/chess-elite-dataset-generation"
+    "jadakil/chess-elite-dataset-generation",
+    "jadakil/chess-elite-gen-2025-09"
   ]
 }

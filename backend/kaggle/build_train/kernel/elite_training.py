@@ -39,6 +39,9 @@ DEVICE = os.environ.get("TRAIN_DEVICE", "cuda")
 # went NaN), so v4 trains in fp32 with a lower learning rate.
 LR = os.environ.get("TRAIN_LR", "0.0002")
 USE_AMP = os.environ.get("TRAIN_USE_AMP", "0") == "1"
+# "latest" continues from the checkpoint dataset's newest iteration (v5 goes on
+# from v4 model 7, as the user chose); "best" starts from its best model.
+START_FROM = os.environ.get("TRAIN_START_FROM", "latest")
 # "both" = zip in the kernel output + a new version of the checkpoint dataset
 # after every iteration. Old versions are kept so any iteration can be picked.
 AUTOSAVE = os.environ.get("TRAIN_AUTOSAVE", "both")
@@ -238,8 +241,13 @@ def main() -> None:
     assert_dataset_is_large_enough()
     samples_dir, total_samples = combine_shard_dirs()
     assert_checkpoint_attached()
-    checkpoint = find_best_checkpoint()
-    print(f"[PLAN] starting from best model {checkpoint}", flush=True)
+    if START_FROM == "best":
+        checkpoint = find_best_checkpoint()
+        print(f"[PLAN] starting from best model {checkpoint}", flush=True)
+    else:
+        # No --base-model: the wrapper resumes from the dataset's latest checkpoint.
+        checkpoint = None
+        print("[PLAN] starting from the latest checkpoint in the checkpoint dataset", flush=True)
     ensure_dependencies()
 
     print(
