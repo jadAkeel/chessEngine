@@ -186,3 +186,10 @@ def test_kernel_restore_is_noop_without_previous_output(tmp_path: Path):
     output = tmp_path / "working" / "prepared_shards"
     kernel.restore_previous_output(output, root)
     assert not output.exists()
+
+
+def test_generation_kernel_prefers_code_dataset_over_stale_output_copy(tmp_path: Path):
+    kernel = _load_kernel_module()
+    _fake_extracted(tmp_path / "input" / "chess-elite-dataset-generation" / "code")
+    real = _fake_extracted(tmp_path / "input" / "chess-engine-code" / "nested")
+    assert kernel.find_code_root(tmp_path / "input") == real

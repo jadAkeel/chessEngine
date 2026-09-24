@@ -53,6 +53,10 @@ def _is_code_root(base: Path) -> bool:
     return (base / "app" / "game" / "board_encoding.py").exists() and (base / "scripts").exists()
 
 
+def _code_root_rank(path: Path) -> tuple[int, int, str]:
+    return (0 if CODE_DIR_NAME in path.parts else 1, len(path.parts), str(path))
+
+
 def find_code_root(root: Path | None = None, extract_to: Path | None = None) -> Path:
     """Locate the packaged backend code under /kaggle/input.
 
@@ -68,12 +72,15 @@ def find_code_root(root: Path | None = None, extract_to: Path | None = None) -> 
 
     # Kaggle nests mounts unpredictably (e.g. /kaggle/input/datasets/<user>/<slug>),
     # so anchor on the marker file instead of assuming a directory depth.
-    for marker in sorted(root.rglob("board_encoding.py")):
-        base = marker.parent.parent.parent
+    # Prefer the code dataset: an attached kernel output (e.g. the generation
+    # kernel) carries its own, possibly stale, copy under .../code. v4 ran that
+    # stale copy because it sorts first alphabetically.
+    bases = [m.parent.parent.parent for m in root.rglob("board_encoding.py")]
+    for base in sorted(bases, key=_code_root_rank):
         if _is_code_root(base):
             return base
 
-    for archive in sorted(root.rglob("chess_engine_code.zip")):
+    for archive in sorted(root.rglob("chess_engine_code.zip"), key=_code_root_rank):
         target = Path(extract_to) if extract_to else WORKING_ROOT / "code"
         target.mkdir(parents=True, exist_ok=True)
         print(f"[CODE] extracting {archive} -> {target}", flush=True)

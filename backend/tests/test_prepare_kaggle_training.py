@@ -217,3 +217,19 @@ def test_training_kernel_can_attach_generation_kernel_output(tmp_path: Path):
     )
     metadata = json.loads((kernel_dir / "kernel-metadata.json").read_text(encoding="utf-8"))
     assert metadata["kernel_sources"] == ["jadakil/chess-elite-dataset-generation"]
+
+
+def test_prefers_code_dataset_over_a_kernel_outputs_stale_copy(tmp_path: Path):
+    """v4 ran the generation kernel's old code copy because it sorted first."""
+    kernel = _load_kernel_module()
+
+    def fake_code(base: Path) -> Path:
+        (base / "app" / "game").mkdir(parents=True)
+        (base / "app" / "game" / "board_encoding.py").write_text("x", encoding="utf-8")
+        (base / "scripts").mkdir()
+        return base
+
+    fake_code(tmp_path / "input" / "chess-elite-dataset-generation" / "code")
+    real = fake_code(tmp_path / "input" / "chess-engine-code" / "chess_engine_code")
+
+    assert kernel.find_code_root(tmp_path / "input") == real
