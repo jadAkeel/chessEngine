@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -798,3 +799,35 @@ def test_auto_seek_backs_off_when_challenges_go_unanswered():
     waits = [auto_seek_backoff_sec(n) for n in range(0, 8)]
     assert waits[:6] == [30.0, 30.0, 60.0, 120.0, 240.0, 480.0]
     assert waits[6] == waits[7] == 600.0, "capped at 10 minutes"
+
+
+@pytest.mark.asyncio
+async def test_auto_seek_rests_a_bot_that_ignored_the_challenge():
+    bot = LichessBot(bot_cfg=BotConfig(token="test_token", min_rating=1500, max_rating=2100))
+    bot.bot_id = "me"
+
+    online = [{"id": "sleepy", "perfs": {"blitz": {"rating": 1700}}}]
+    list_resp = MagicMock()
+    list_resp.status = 200
+    list_resp.text = AsyncMock(return_value="\n".join(json.dumps(b) for b in online))
+    list_resp.__aenter__ = AsyncMock(return_value=list_resp)
+    list_resp.__aexit__ = AsyncMock(return_value=None)
+
+    chal_resp = MagicMock()
+    chal_resp.status = 200
+    chal_resp.json = AsyncMock(return_value={"challenge": {"id": "c123"}})
+    chal_resp.__aenter__ = AsyncMock(return_value=chal_resp)
+    chal_resp.__aexit__ = AsyncMock(return_value=None)
+
+    session = MagicMock()
+    session.get.return_value = list_resp
+    session.post.return_value = chal_resp
+
+    assert await bot._challenge_random_online_bot(session) is True
+    await bot._drop_ignored_challenge(session)
+
+    assert session.post.call_args_list[-1].args[0].endswith("/api/challenge/c123/cancel")
+    assert bot._failed_targets["sleepy"] > time.time() + 3000
+    session.post.reset_mock()
+    assert await bot._challenge_random_online_bot(session) is False, "the ignoring bot is skipped"
+    session.post.assert_not_called()

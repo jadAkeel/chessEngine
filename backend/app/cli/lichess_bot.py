@@ -101,6 +101,24 @@ def auto_seek_backoff_sec(unanswered: int) -> float:
     return float(min(600.0, 30.0 * 2 ** (unanswered - 1)))
 
 
+# A bot that ignored or declined a challenge is skipped this long, so auto-seek
+# moves through the whole online pool instead of re-asking the same few.
+IGNORED_TARGET_COOLDOWN_SEC = 3600.0
+
+
+async def _challenge_id(resp: Any) -> str | None:
+    """Id of a created challenge (the response nests it under ``challenge`` on some API versions)."""
+    try:
+        data = await resp.json(content_type=None)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    challenge = data.get("challenge") if isinstance(data.get("challenge"), dict) else data
+    challenge_id = challenge.get("id")
+    return str(challenge_id) if challenge_id else None
+
+
 def _estimated_moves_to_go(board: chess.Board, increment_sec: float = 0.0) -> int:
     """Moves the remaining clock must cover.
 
@@ -323,6 +341,7 @@ class LichessBot:
         self._shutdown_event = asyncio.Event()
         self._engine_lock = asyncio.Lock()
         self._failed_targets: dict[str, float] = {}
+        self._last_challenge: tuple[str, str | None] | None = None
 
     def get_headers(self) -> dict[str, str]:
         return {
@@ -732,6 +751,7 @@ class LichessBot:
                             unanswered = 0
                         else:
                             unanswered += 1
+                            await self._drop_ignored_challenge(session)
                             wait = auto_seek_backoff_sec(unanswered) - 30.0
                             if wait > 0:
                                 logger.info("Auto-seek: %s challenges unanswered, waiting %.0fs", unanswered, wait)
@@ -746,7 +766,8 @@ class LichessBot:
         preferred_targets = ["maia1", "maia5", "maia9"]
         now = time.time()
         try:
-            url = f"{self.api_base}/api/bot/online?nb=50"
+            # Only about a third of online bots are inside the rating window.
+            url = f"{self.api_base}/api/bot/online?nb=200"
             async with session.get(url, headers=self.get_headers()) as resp:
                 if resp.status == 200:
                     lines = (await resp.text()).strip().splitlines()
@@ -787,6 +808,7 @@ class LichessBot:
                             async with session.post(chal_url, headers=self.get_headers(), data=data) as chal_resp:
                                 if chal_resp.status == 200:
                                     logger.info("Auto-seek: Sent challenge to online bot %s", target_id)
+                                    self._last_challenge = (target_id, await _challenge_id(chal_resp))
                                     return True
                                 elif chal_resp.status == 429:
                                     resp_text = await chal_resp.text()
@@ -805,6 +827,23 @@ class LichessBot:
         except Exception as exc:
             logger.debug("Error seeking online bots: %s", exc)
         return False
+
+    async def _drop_ignored_challenge(self, session: aiohttp.ClientSession) -> None:
+        """Cancel the unanswered challenge and rest its target so the next pick is someone else."""
+        if self._last_challenge is None:
+            return
+        target_id, challenge_id = self._last_challenge
+        self._last_challenge = None
+        self._failed_targets[target_id] = time.time() + IGNORED_TARGET_COOLDOWN_SEC
+        if not challenge_id:
+            return
+        try:
+            async with session.post(
+                f"{self.api_base}/api/challenge/{challenge_id}/cancel", headers=self.get_headers()
+            ):
+                pass
+        except Exception as exc:
+            logger.debug("Cancel of challenge %s failed: %s", challenge_id, exc)
 
     async def _handle_game_end(
         self,
@@ -933,6 +972,15 @@ class LichessBot:
                             if event_type == "challenge":
                                 challenge_data = event.get("challenge", {})
                                 asyncio.create_task(self.handle_challenge_event(session, challenge_data))
+
+                            elif event_type == "challengeDeclined":
+                                challenge_data = event.get("challenge", {})
+                                dest = str((challenge_data.get("destUser") or {}).get("id", "")).lower()
+                                if dest and dest != self.bot_id.lower():
+                                    self._failed_targets[dest] = time.time() + IGNORED_TARGET_COOLDOWN_SEC
+                                    logger.info(
+                                        "Auto-seek: %s declined (%s)", dest, challenge_data.get("declineReasonKey", "?")
+                                    )
 
                             elif event_type == "gameStart":
                                 game_data = event.get("game", {})
