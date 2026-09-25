@@ -25,12 +25,15 @@ CODE_DIR_NAME = os.environ.get("CHESS_CODE_DIR", "chess-engine-code")
 INPUT_ROOT = Path(os.environ.get("KAGGLE_INPUT_ROOT", "/kaggle/input"))
 WORKING_ROOT = Path(os.environ.get("KAGGLE_WORKING_ROOT", "/kaggle/working"))
 
-# The user wants runs of at most ~6 h; the budget stops cleanly before an
-# iteration that would overrun it, so ITERATIONS is only an upper bound.
-ITERATIONS = os.environ.get("TRAIN_ITERATIONS", "8")
-TIME_BUDGET_HOURS = os.environ.get("TRAIN_TIME_BUDGET_HOURS", "5.7")
-# Shorter fp32 iterations (~70 min) give several checkpoints to pick from within 6 h.
-TRAIN_STEPS_PER_ITER = os.environ.get("TRAIN_STEPS_PER_ITER", "5000")
+# The user asked for ~14 h of training; a Kaggle session is capped at 12 h, so it
+# runs as two ~7 h sessions (the second continues from the first's latest). The
+# budget stops cleanly before an iteration that would overrun it, so ITERATIONS
+# is only an upper bound.
+ITERATIONS = os.environ.get("TRAIN_ITERATIONS", "40")
+TIME_BUDGET_HOURS = os.environ.get("TRAIN_TIME_BUDGET_HOURS", "6.8")
+# x2 epochs = 20k steps per 3M-sample buffer. Measured on 2x T4 with the O(batch)
+# sampler: 0.074 s/step (0.216 before), so ~25 min of training per ~8 min refill.
+TRAIN_STEPS_PER_ITER = os.environ.get("TRAIN_STEPS_PER_ITER", "10000")
 BUFFER_SIZE = os.environ.get("TRAIN_BUFFER_SIZE", "3000000")
 MAX_SAMPLES = os.environ.get("TRAIN_MAX_SAMPLES", "50000000")
 BATCH_SIZE = os.environ.get("TRAIN_BATCH_SIZE", "128")
@@ -39,9 +42,9 @@ DEVICE = os.environ.get("TRAIN_DEVICE", "cuda")
 # went NaN), so v4 trains in fp32 with a lower learning rate.
 LR = os.environ.get("TRAIN_LR", "0.0002")
 USE_AMP = os.environ.get("TRAIN_USE_AMP", "0") == "1"
-# "latest" continues from the checkpoint dataset's newest iteration (v5 goes on
-# from v4 model 7, as the user chose); "best" starts from its best model.
-START_FROM = os.environ.get("TRAIN_START_FROM", "latest")
+# "latest" continues from the checkpoint dataset's newest iteration; "best" starts
+# from its best model (session 1 of the 14 h run: mrj v1 iter 6, as the user chose).
+START_FROM = os.environ.get("TRAIN_START_FROM", "best")
 # "both" = zip in the kernel output + a new version of the checkpoint dataset
 # after every iteration. Old versions are kept so any iteration can be picked.
 AUTOSAVE = os.environ.get("TRAIN_AUTOSAVE", "both")
