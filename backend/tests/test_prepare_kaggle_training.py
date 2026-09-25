@@ -121,7 +121,7 @@ def test_training_kernel_autosaves_every_iteration_and_keeps_versions():
     source = KERNEL_SCRIPT.read_text(encoding="utf-8")
     assert kernel.AUTOSAVE == "both"
     assert kernel.CHECKPOINT_DATASET_ID == "jadakil/chess-elite-checkpoints"
-    assert kernel.ITERATIONS == "8"
+    assert int(kernel.ITERATIONS) >= 20, "the time budget, not the iteration cap, ends a session"
     assert '"--autosave-every", "1"' in source
     assert "--delete-old-versions" not in source.split("def main")[1], "old versions must be kept"
     assert "ensure_dependencies()" in source.split("def main")[1], "deps must install before training"
@@ -204,7 +204,8 @@ def test_v4_kernel_trains_fp32_with_lower_lr_inside_time_budget():
     main_src = KERNEL_SCRIPT.read_text(encoding="utf-8").split("def main")[1]
     assert kernel.USE_AMP is False
     assert float(kernel.LR) < 0.0006
-    assert 0 < float(kernel.TIME_BUDGET_HOURS) <= 6, "runs are capped at ~6 h"
+    # A Kaggle session is killed at 12 h; leave room for setup and the last autosave.
+    assert 0 < float(kernel.TIME_BUDGET_HOURS) <= 11, "a session must end well inside the 12 h Kaggle limit"
     for flag in ('"--samples-path"', '"--lr"', '"--time-budget-hours"', '"--no-amp"', '"--base-model"'):
         assert flag in main_src
 
@@ -235,11 +236,12 @@ def test_prefers_code_dataset_over_a_kernel_outputs_stale_copy(tmp_path: Path):
     assert kernel.find_code_root(tmp_path / "input") == real
 
 
-def test_v5_continues_from_latest_checkpoint_by_default():
-    """The user chose to continue from v4 model 7, the checkpoint dataset's latest."""
+def test_14h_run_session_1_starts_from_the_best_model():
+    """The user chose mrj v1 iter 6 (the checkpoint dataset's best) for the 14 h run."""
     kernel = _load_kernel_module()
     main_src = KERNEL_SCRIPT.read_text(encoding="utf-8").split("def main")[1]
-    assert kernel.START_FROM == "latest"
+    assert kernel.START_FROM in ("best", "latest")
+    assert kernel.START_FROM == "best"
     assert 'if START_FROM == "best"' in main_src
 
 
