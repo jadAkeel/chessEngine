@@ -8,6 +8,7 @@ from the newest available checkpoint.
 """
 
 import argparse
+import re
 import json
 import shutil
 import sys
@@ -27,13 +28,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kernel-slug", type=str, default="chess-elite-training")
     parser.add_argument("--kernel-title", type=str, default="Chess Elite Training")
     parser.add_argument("--code-slug", type=str, default="chess-engine-code")
-    parser.add_argument("--dataset-slug", type=str, required=True, help="Generated dataset slug, e.g. chess-elite-20m")
+    parser.add_argument(
+        "--dataset-slug", type=str, default="",
+        help="Generated shard dataset slug, e.g. chess-elite-21m; omit when all months come from --kernel-source",
+    )
     parser.add_argument("--checkpoint-slug", type=str, default="chess-elite-checkpoints")
     parser.add_argument(
         "--kernel-source", action="append", default=[],
         help="Kernel whose output is attached as extra shards, e.g. chess-elite-dataset-generation (repeatable)",
     )
     return parser
+
+
+def _bake_checkpoint_dataset(script: Path, dataset_id: str) -> None:
+    """Point autosave at the pushing account's checkpoint dataset (kernels take no env vars)."""
+    source = script.read_text(encoding="utf-8")
+    pattern = r'CHECKPOINT_DATASET_ID = os\.environ\.get\("TRAIN_CHECKPOINT_DATASET", "[^"]+"\)'
+    baked, count = re.subn(
+        pattern, f'CHECKPOINT_DATASET_ID = os.environ.get("TRAIN_CHECKPOINT_DATASET", "{dataset_id}")', source
+    )
+    if count != 1:
+        raise RuntimeError("Could not find the CHECKPOINT_DATASET_ID default in the kernel script")
+    script.write_text(baked, encoding="utf-8")
 
 
 def build_training_kernel(
@@ -54,12 +70,15 @@ def build_training_kernel(
     if not KERNEL_SOURCE.exists():
         raise FileNotFoundError(f"Missing kernel script: {KERNEL_SOURCE}")
     shutil.copy2(KERNEL_SOURCE, kernel_dir / KERNEL_SOURCE.name)
+    _bake_checkpoint_dataset(kernel_dir / KERNEL_SOURCE.name, f"{username}/{checkpoint_slug}")
 
     sources = [
         f"{username}/{code_slug}",
-        f"{username}/{dataset_slug}",
+        *([f"{username}/{dataset_slug}"] if dataset_slug else []),
         f"{username}/{checkpoint_slug}",
     ]
+    if not dataset_slug and not kernel_sources:
+        raise ValueError("Attach shards with --dataset-slug or at least one --kernel-source")
 
     metadata = {
         "id": f"{username}/{kernel_slug}",

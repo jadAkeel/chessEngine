@@ -241,3 +241,28 @@ def test_v5_continues_from_latest_checkpoint_by_default():
     main_src = KERNEL_SCRIPT.read_text(encoding="utf-8").split("def main")[1]
     assert kernel.START_FROM == "latest"
     assert 'if START_FROM == "best"' in main_src
+
+
+def test_training_kernel_can_take_all_months_from_kernel_outputs(tmp_path: Path):
+    kernel_dir = build_training_kernel(
+        tmp_path, "mrjadaqeel", "chess-elite-training", "Title",
+        "chess-engine-code", "", "chess-elite-checkpoints",
+        ["chess-elite-gen-2025-09", "chess-elite-gen-2025-10", "chess-elite-gen-2025-11"],
+    )
+    metadata = json.loads((kernel_dir / "kernel-metadata.json").read_text(encoding="utf-8"))
+    assert metadata["dataset_sources"] == ["mrjadaqeel/chess-engine-code", "mrjadaqeel/chess-elite-checkpoints"]
+    assert len(metadata["kernel_sources"]) == 3
+
+
+def test_training_kernel_needs_some_shard_source(tmp_path: Path):
+    with pytest.raises(ValueError):
+        build_training_kernel(tmp_path, "u", "k", "T", "code", "", "ckpt", [])
+
+
+def test_autosave_targets_the_pushing_accounts_checkpoint_dataset(tmp_path: Path):
+    kernel_dir = build_training_kernel(
+        tmp_path, "mrjadaqeel", "chess-elite-training", "Title",
+        "chess-engine-code", "", "chess-elite-checkpoints", ["chess-elite-gen-2025-09"],
+    )
+    source = (kernel_dir / "elite_training.py").read_text(encoding="utf-8")
+    assert '"TRAIN_CHECKPOINT_DATASET", "mrjadaqeel/chess-elite-checkpoints")' in source
