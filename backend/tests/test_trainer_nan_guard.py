@@ -85,3 +85,15 @@ def test_refuses_to_start_from_nan_weights():
 
     with pytest.raises(RuntimeError, match="non-finite before training"):
         trainer.train_model(model, optimizer, _filled_buffer(cfg), device="cpu", cfg=cfg)
+
+
+def test_forward_module_is_the_model_itself_without_two_gpus():
+    """DataParallel only wraps with 2+ GPUs; checkpoints always come from the bare model."""
+    import torch
+
+    from app.training.trainer import _forward_module
+
+    model = torch.nn.Linear(2, 2)
+    assert _forward_module(model, "cpu") is model
+    if torch.cuda.device_count() < 2:
+        assert _forward_module(model, "cuda") is model

@@ -23,6 +23,27 @@ _EMPTY_UINT16 = np.zeros((0,), dtype=np.uint16)
 _EMPTY_FLOAT16 = np.zeros((0,), dtype=np.float16)
 _EMPTY_FLOAT32 = np.zeros((0,), dtype=np.float32)
 _EMPTY_INT64 = np.zeros((0,), dtype=np.int64)
+# Below this pool/batch ratio a full permutation is cheap and exact.
+_SMALL_POOL_RATIO = 8
+
+
+def _uniform_choice_without_replacement(pool_size: int, k: int) -> np.ndarray:
+    """k distinct positions in [0, pool_size), uniformly, in O(k).
+
+    ``np.random.choice(n, k, replace=False)`` permutes all n positions: on a 3M
+    buffer that was ~130 ms per training step, more than the GPU step itself.
+    Drawing with replacement and redrawing the rare duplicates gives the same
+    uniform distribution over k-subsets.
+    """
+    if k * _SMALL_POOL_RATIO >= pool_size:
+        return np.random.choice(pool_size, size=k, replace=False)
+    chosen = np.random.randint(0, pool_size, size=k)
+    while True:
+        _unique, first = np.unique(chosen, return_index=True)
+        if first.size == k:
+            return chosen
+        kept = chosen[np.sort(first)]
+        chosen = np.concatenate([kept, np.random.randint(0, pool_size, size=k - kept.size)])
 
 
 @dataclass(frozen=True)
@@ -540,13 +561,27 @@ class ReplayBuffer:
         for state, policy, value in game_data:
             self.add(state, policy, value)
 
+    def _pool_without(self, pool: np.ndarray, excluded: np.ndarray, needed: int) -> np.ndarray:
+        """Pool to draw ``needed`` more samples from, with ``excluded`` removed.
+
+        Uniform sampling only needs a uniform candidate subset large enough to
+        survive the exclusion, which avoids an O(n) ``isin`` over the whole
+        buffer every step. Prioritized sampling weighs by pool size, so it keeps
+        the exact pool.
+        """
+        candidates = int(needed) + int(excluded.size)
+        if bool(getattr(self.replay_cfg, 'prioritized', True)) or candidates * _SMALL_POOL_RATIO >= pool.size:
+            return pool[np.isin(pool, excluded, invert=True)]
+        subset = pool[_uniform_choice_without_replacement(int(pool.size), candidates)]
+        return subset[np.isin(subset, excluded, invert=True)]
+
     def _sample_from_physical_indices(self, physical_indices: np.ndarray, k: int, beta: float):
         pool = np.asarray(physical_indices, dtype=np.int64).reshape(-1)
         if k <= 0 or pool.size == 0:
             return np.zeros((0,), dtype=np.int64), np.zeros((0,), dtype=np.float32)
         k = min(k, int(pool.size))
         if not bool(getattr(self.replay_cfg, 'prioritized', True)):
-            chosen_pos = np.random.choice(pool.size, size=k, replace=False)
+            chosen_pos = _uniform_choice_without_replacement(int(pool.size), k)
             return pool[chosen_pos], np.ones((k,), dtype=np.float32)
 
         priorities = np.clip(self._priorities[pool].astype(np.float32, copy=False), float(self.replay_cfg.eps), 10.0)
@@ -680,8 +715,7 @@ class ReplayBuffer:
                 recent_batch = max(1, min(int(round(batch_size * recent_fraction)), int(recent_physical.size)))
                 recent_chosen, recent_weights = self._sample_from_physical_indices(recent_physical, recent_batch, beta)
                 remaining = batch_size - int(recent_chosen.size)
-                other_mask = np.isin(active_physical, recent_chosen, assume_unique=False, invert=True)
-                other_pool = active_physical[other_mask]
+                other_pool = self._pool_without(active_physical, recent_chosen, remaining)
                 other_chosen, other_weights = self._sample_from_physical_indices(other_pool if other_pool.size else active_physical, remaining, beta)
                 chosen = np.concatenate([recent_chosen, other_chosen]).astype(np.int64, copy=False)
                 weights = np.concatenate([recent_weights, other_weights]).astype(np.float32, copy=False)

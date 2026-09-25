@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import time
 
 import numpy as np
 import torch
@@ -176,6 +177,22 @@ PARAM_CHECK_EVERY = 50
 MAX_NONFINITE_STEPS = 200
 
 
+DEBUG_EVERY = 50
+
+
+def _forward_module(model, device):
+    """The module to run training batches through: ``nn.DataParallel`` over every
+    visible GPU when there is more than one (Kaggle gives two T4s), else the model.
+
+    The wrapper shares the model's parameters, so the optimizer, checkpoints and
+    state_dict keys are unchanged; only the forward pass is split across GPUs.
+    """
+    if not str(device).startswith('cuda') or not torch.cuda.is_available() or torch.cuda.device_count() < 2:
+        return model
+    print(f"[TRAIN] DataParallel over {torch.cuda.device_count()} GPUs", flush=True)
+    return torch.nn.DataParallel(model)
+
+
 def _params_finite(model) -> bool:
     checks = [torch.isfinite(t).all() for t in model.state_dict().values() if t.is_floating_point()]
     return bool(torch.stack(checks).all().item()) if checks else True
@@ -250,6 +267,9 @@ def train_model(
         if nonfinite_steps > MAX_NONFINITE_STEPS:
             raise RuntimeError(f"Training diverged: {nonfinite_steps} non-finite steps in one iteration")
 
+    forward = _forward_module(model, device)
+    window_started = time.perf_counter()
+
     for step in range(total_steps):
         beta = beta_start + (beta_end - beta_start) * min(1.0, global_step / 2000.0)
 
@@ -273,7 +293,14 @@ def train_model(
         optimizer.zero_grad(set_to_none=True)
 
         with autocast(device_type='cuda', enabled=use_amp):
-            pred_policies, pred_values = model(states)
+            try:
+                pred_policies, pred_values = forward(states)
+            except RuntimeError as exc:
+                if forward is model:
+                    raise
+                print(f"[TRAIN] DataParallel failed ({exc}); continuing on one GPU", flush=True)
+                forward = model
+                pred_policies, pred_values = model(states)
 
             if isinstance(policies, SparsePolicyBatchTensor):
                 per_sample_policy, log_probs, pred_probs, entropy = _sparse_policy_loss(
@@ -288,22 +315,25 @@ def train_model(
                     label_smoothing,
                 )
 
-            with torch.no_grad():
-                pred_value_mean = float(pred_values.mean().item())
-                pred_value_std = float(pred_values.std().item())
-                pred_value_abs = float(pred_values.abs().mean().item())
+            # Each .item() waits for the GPU; only collect the debug stats when printed.
+            log_debug = step % DEBUG_EVERY == 0
+            if log_debug:
+                with torch.no_grad():
+                    pred_value_mean = float(pred_values.mean().item())
+                    pred_value_std = float(pred_values.std().item())
+                    pred_value_abs = float(pred_values.abs().mean().item())
 
-                target_value_mean = float(values.mean().item())
-                target_value_std = float(values.std().item())
+                    target_value_mean = float(values.mean().item())
+                    target_value_std = float(values.std().item())
 
-                top_k = min(2, pred_probs.size(1))
-                top_probs, _ = torch.topk(pred_probs, k=top_k, dim=1)
-                top1_mean = float(top_probs[:, 0].mean().item())
-                top2_mean = float(top_probs[:, 1].mean().item()) if top_k > 1 else 0.0
-                gap_mean = float((top_probs[:, 0] - top_probs[:, 1]).mean().item()) if top_k > 1 else 0.0
+                    top_k = min(2, pred_probs.size(1))
+                    top_probs, _ = torch.topk(pred_probs, k=top_k, dim=1)
+                    top1_mean = float(top_probs[:, 0].mean().item())
+                    top2_mean = float(top_probs[:, 1].mean().item()) if top_k > 1 else 0.0
+                    gap_mean = float((top_probs[:, 0] - top_probs[:, 1]).mean().item()) if top_k > 1 else 0.0
 
-                entropy_val = float((-(pred_probs * log_probs).sum(dim=1)).mean().item())
-                draw_ratio = float((values.abs() < 0.1).float().mean().item())
+                    entropy_val = float((-(pred_probs * log_probs).sum(dim=1)).mean().item())
+                    draw_ratio = float((values.abs() < 0.1).float().mean().item())
 
             per_sample_value = F.mse_loss(pred_values, values, reduction='none').squeeze(1)
 
@@ -342,9 +372,13 @@ def train_model(
 
         global_step += 1
 
-        if step % 50 == 0:
+        if log_debug:
+            now = time.perf_counter()
+            sec_per_step = (now - window_started) / (DEBUG_EVERY if step else 1)
+            window_started = now
             print(
                 f"[TRAIN DEBUG] step={step} "
+                f"sec_per_step={sec_per_step:.3f} "
                 f"pred_value_mean={pred_value_mean:.3f} "
                 f"pred_value_std={pred_value_std:.3f} "
                 f"pred_value_abs={pred_value_abs:.3f} "
@@ -354,7 +388,8 @@ def train_model(
                 f"top2={top2_mean:.3f} "
                 f"gap={gap_mean:.3f} "
                 f"entropy={entropy_val:.3f} "
-                f"draw_ratio={draw_ratio:.3f}"
+                f"draw_ratio={draw_ratio:.3f}",
+                flush=True,
             )
 
     if not losses:

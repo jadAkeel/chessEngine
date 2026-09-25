@@ -201,6 +201,10 @@ def _write_config(args: argparse.Namespace) -> Path:
         # (~12.8 GB) no matter how few samples are streamed in.
         "replay:",
         f"  capacity: {int(args.buffer_size)}",
+        # The buffer is refilled from shuffled shards every iteration, so the
+        # self-play "recent window" (80 % of each batch from the last 800k
+        # samples streamed) would only oversample a few shards. Sample uniformly.
+        "  recent_sample_fraction: 0.0",
         "",
         "system:",
         f"  checkpoint_path: {_yaml_string(Path(args.save_dir) / 'external_best_model.pth')}",

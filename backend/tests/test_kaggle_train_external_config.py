@@ -154,3 +154,9 @@ def test_time_budget_stops_before_an_iteration_that_cannot_finish(elapsed_h, slo
     from scripts.kaggle_train_external import _fits_time_budget
 
     assert _fits_time_budget(elapsed_h * 3600, slowest_h * 3600, budget_h) is fits
+
+
+def test_supervised_config_samples_the_buffer_uniformly(tmp_path: Path):
+    """The buffer holds shuffled shards; the self-play recent window would oversample a few."""
+    cfg = load_config(str(_write_config(_args(tmp_path))))
+    assert cfg.replay.recent_sample_fraction == 0.0
