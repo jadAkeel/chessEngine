@@ -1,7 +1,24 @@
 @import "tailwindcss";
 
+@utility no-scrollbar {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
 @layer base {
+  html {
+    color-scheme: dark;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-text-size-adjust: 100%;
+  }
+
   body {
     @apply bg-zinc-950 text-zinc-100;
+  }
+
+  button {
+    touch-action: manipulation;
   }
 }

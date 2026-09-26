@@ -1,4 +1,9 @@
 const sounds = {};
+let enabled = true;
+
+export function setSoundEnabled(value) {
+  enabled = Boolean(value);
+}
 
 function preload(key, path) {
   const audio = new Audio(path);
@@ -34,6 +39,7 @@ export function playCheckSound() {
 }
 
 export function playMoveSoundFor(move, game) {
+  if (!enabled) return;
   if (move.captured) {
     playCaptureSound();
   } else {
