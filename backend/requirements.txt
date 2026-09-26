@@ -3,6 +3,10 @@ uvicorn[standard]>=0.30.0
 python-chess>=1.999
 numpy>=1.26.0
 PyYAML>=6.0.1
+aiohttp>=3.9.0
+python-dotenv>=1.0.0
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.12.0+cpu
 

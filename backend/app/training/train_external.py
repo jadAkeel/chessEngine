@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import copy
+import gc
 import json
+import hashlib
 import math
 import random
 from dataclasses import replace
@@ -22,6 +24,7 @@ from app.model.network import ChessNet
 
 # 🔥 الجديد
 from app.training.external_samples import load_external_samples_sharded
+from app.training.external_samples import _sample_hash
 
 from app.training.replay_buffer import ReplayBuffer
 from app.training.trainer import evaluate_model_on_samples, train_model
@@ -62,7 +65,8 @@ def _load_history(path: Path) -> dict:
 
 def _best_val_loss_from_history(history: dict) -> float:
     best = float("inf")
-    for value in history.get("val_loss", []):
+    start = int(history.get("validation_start_index", 0))
+    for value in history.get("val_loss", [])[start:]:
         try:
             val_loss = float(value)
         except (TypeError, ValueError):
@@ -70,6 +74,20 @@ def _best_val_loss_from_history(history: dict) -> float:
         if math.isfinite(val_loss):
             best = min(best, val_loss)
     return best
+
+
+def _set_validation_history(history: dict, samples, cfg=None) -> float:
+    digest = hashlib.sha256(b'position-split-v1')
+    if cfg is not None:
+        digest.update(repr((cfg.training.value_loss_coeff, cfg.training.entropy_coeff,
+                            cfg.training.policy_label_smoothing)).encode('ascii'))
+    for state, policy, value in samples:
+        digest.update(_sample_hash(state, int(policy.indices[0]), value))
+    fingerprint = digest.hexdigest()
+    if history.get('validation_fingerprint') != fingerprint:
+        history['validation_start_index'] = len(history.get('val_loss', []))
+        history['validation_fingerprint'] = fingerprint
+    return _best_val_loss_from_history(history)
 
 
 def main() -> None:
@@ -108,13 +126,33 @@ def main() -> None:
     val_iter = load_external_samples_sharded(
         sample_path,
         cfg,
-        max_samples=int(args.max_val_samples if args.max_val_samples is not None else 50000)
+        max_samples=int(args.max_val_samples if args.max_val_samples is not None else 50000),
+        partition='validation',
     )
 
     for sample in val_iter:
         val_samples.append(sample)
 
     logger.info(f"[INIT] Validation samples: {len(val_samples)}")
+    if not val_samples:
+        raise ValueError("No validation samples; cannot select a best model from an empty validation set")
+    overall_best_val_loss = _set_validation_history(history, val_samples, cfg)
+
+    model = ChessNet(cfg).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.training.lr, weight_decay=cfg.training.weight_decay)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=cfg.training.lr_decay_gamma)
+    scaler = GradScaler(enabled=bool(cfg.training.use_amp and str(device).startswith('cuda')))
+    global_step = 0
+    if args.base_model:
+        if not Path(args.base_model).exists():
+            raise FileNotFoundError(args.base_model)
+        load_checkpoint(args.base_model, model=model, device=device)
+    elif latest_ckpt.exists():
+        restored = load_checkpoint(latest_ckpt, model=model, optimizer=optimizer, scheduler=scheduler,
+                                   scaler=scaler, device=device)
+        global_step = int(restored['global_step'])
+    elif args.resume:
+        raise FileNotFoundError(latest_ckpt)
 
     # ======================================
     # 🔁 ITERATIONS LOOP (UNCHANGED LOGIC)
@@ -125,38 +163,16 @@ def main() -> None:
         logger.info("ITERATION %s / %s", current_iter, total_iterations)
         logger.info("=" * 60)
 
-        model = ChessNet(cfg).to(device)
-        baseline_model = ChessNet(cfg).to(device)
-
-        optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=cfg.training.lr,
-            weight_decay=cfg.training.weight_decay,
-        )
-
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(
-            optimizer,
-            gamma=cfg.training.lr_decay_gamma,
-        )
-
-        scaler = GradScaler(enabled=bool(cfg.training.use_amp and str(device).startswith('cuda')))
-
-        global_step = 0
-
-        # 🔹 load weights
-        if current_iter == 1 and args.base_model and Path(args.base_model).exists():
-            logger.info("[ITER %s] Loading base model", current_iter)
-            load_checkpoint(args.base_model, model=model, device=device)
-
-        elif latest_ckpt.exists():
-            logger.info("[ITER %s] Loading previous checkpoint", current_iter)
-            load_checkpoint(latest_ckpt, model=model, device=device)
-
-        else:
-            logger.info("[ITER %s] Starting from scratch", current_iter)
         # ======================================
         # 🔥 STREAM → BUFFER (CORE FIX)
         # ======================================
+
+        # Drop the previous iteration's buffer before allocating the next one.
+        # ReplayBuffer preallocates capacity upfront (~12.8 GB of states at
+        # capacity=5M), so rebinding without releasing first would briefly hold
+        # two full buffers and exhaust the machine.
+        train_buffer = None
+        gc.collect()
 
         train_buffer = ReplayBuffer(cfg)
         buffer_limit = int(getattr(cfg.training, "buffer_size", 200000))
@@ -171,6 +187,8 @@ def main() -> None:
                 if args.max_train_samples is not None
                 else int(external_cfg.max_samples or 0)
             ),
+            partition='train',
+            shuffle_seed=int(external_cfg.seed) + global_step,
         )
 
         count = 0
@@ -185,6 +203,8 @@ def main() -> None:
                 break
 
         logger.info("[ITER %s] Buffer filled: %s samples", current_iter, count)
+        if not len(train_buffer):
+            raise ValueError("No training samples after filtering and validation split")
 
         # ======================================
         # 🔥 TRAIN
@@ -222,6 +242,15 @@ def main() -> None:
             float(train_stats["loss"]),
             current_val_loss
         )
+        if train_stats.get("nonfinite_steps"):
+            logger.warning("[ITER %s] rolled back %s non-finite steps", current_iter, train_stats["nonfinite_steps"])
+
+        # Never overwrite a good checkpoint with NaN weights (iteration 10 of the
+        # 2026-09-23 Kaggle run did, leaving a corrupt latest checkpoint).
+        if not math.isfinite(current_val_loss) or not math.isfinite(float(train_stats["loss"])):
+            raise RuntimeError(
+                f"Iteration {current_iter} produced a non-finite loss; checkpoints left untouched"
+            )
 
         # ======================================
         # 🔥 SAVE
@@ -233,6 +262,10 @@ def main() -> None:
                 model=model,
                 cfg=cfg,
                 global_step=global_step,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                scaler=scaler,
+                meta={'validation_fingerprint': history['validation_fingerprint']},
             )
 
         if current_val_loss < overall_best_val_loss:
@@ -252,6 +285,7 @@ def main() -> None:
 
         if not args.no_save:
             history_path.write_text(json.dumps(history, indent=2))
+        del train_buffer
 
     logger.info("=" * 60)
     logger.info("DONE | Best Val Loss: %.6f", overall_best_val_loss)

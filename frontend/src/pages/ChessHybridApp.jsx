@@ -78,11 +78,11 @@ function pickEngineMove(game, depth) {
   return scored[0].move;
 }
 
-function formatStatus(game, engineThinking, playerColor, isMultiplayer, engineWarmupStatus) {
-  if (!isMultiplayer && engineWarmupStatus === "waking" && engineThinking) return "Loading engine model...";
-  if (!isMultiplayer && engineWarmupStatus === "waking") return "Preparing engine server...";
-  if (!isMultiplayer && engineWarmupStatus === "error" && engineThinking) return "Using local evaluation...";
-  if (!isMultiplayer && engineThinking) return "Engine is thinking...";
+function formatStatus(game, engineThinking, playerColor, isMultiplayer, engineWarmupStatus, opponentName) {
+  if (!isMultiplayer && engineWarmupStatus === "waking" && engineThinking) return `Preparing ${opponentName}...`;
+  if (!isMultiplayer && engineWarmupStatus === "waking") return `Checking ${opponentName}...`;
+  if (!isMultiplayer && engineWarmupStatus === "error") return `${opponentName} is unavailable`;
+  if (!isMultiplayer && engineThinking) return `${opponentName} is thinking...`;
   if (game.isCheckmate()) {
     return game.turn() === "w" ? "Black wins by checkmate" : "White wins by checkmate";
   }
@@ -92,7 +92,7 @@ function formatStatus(game, engineThinking, playerColor, isMultiplayer, engineWa
   if (game.turn() === playerColor) {
     return `Your turn • ${side}${suffix}`;
   }
-  return `${isMultiplayer ? "Opponent" : "Engine"} turn • ${side}${suffix}`;
+  return `${isMultiplayer ? "Opponent" : opponentName} turn • ${side}${suffix}`;
 }
 
 function CapturedPieces({ game }) {
@@ -192,11 +192,22 @@ function getGameEndInfo(game, playerColor, isMultiplayer) {
   };
 }
 
+// Game history for the engine: with it the server sees repetitions and keeps its
+// search tree from one move to the next (moves are UCI from the history's start).
+function historyPayload(game) {
+  const history = game.history({ verbose: true });
+  if (history.length === 0) return {};
+  return { start_fen: history[0].before, moves: history.map((move) => move.lan) };
+}
+
 export default function ChessHybridApp() {
   const gameRef = useRef(new Chess());
+  const boardContainerRef = useRef(null);
   const [fen, setFen] = useState(gameRef.current.fen());
+  const [boardWidth, setBoardWidth] = useState(560);
   const [moveHistory, setMoveHistory] = useState([]);
   const [playerColor, setPlayerColor] = useState("w");
+  const [aiOpponent, setAiOpponent] = useState("gemini");
   const [depth, setDepth] = useState("6");
   const [engineThinking, setEngineThinking] = useState(false);
   const [engineWarmupStatus, setEngineWarmupStatus] = useState("idle");
@@ -213,8 +224,10 @@ export default function ChessHybridApp() {
 
   const wsRef = useRef(null);
   const engineWarmupPromiseRef = useRef(null);
+  const engineReadyOpponentRef = useRef("");
   const game = gameRef.current;
   const playerTurn = game.turn() === playerColor;
+  const aiOpponentName = aiOpponent === "gemini" ? "Gemini 3.8 Flash" : "ChessNet";
   const engineWaking = !isMultiplayer && engineWarmupStatus === "waking";
   const engineLoadOverlayVisible = engineThinking && engineWaking;
 
@@ -226,7 +239,21 @@ export default function ChessHybridApp() {
   const gameEndInfo = useMemo(() => getGameEndInfo(game, playerColor, isMultiplayer), [fen, playerColor, isMultiplayer, game]);
 
   useEffect(() => {
-    void warmupEngineServer();
+    void warmupEngineServer("gemini");
+  }, []);
+
+  useEffect(() => {
+    const container = boardContainerRef.current;
+    if (!container) return undefined;
+
+    const updateBoardWidth = () => {
+      const nextWidth = Math.floor(container.getBoundingClientRect().width);
+      if (nextWidth > 0) setBoardWidth(Math.min(600, nextWidth));
+    };
+    const observer = new ResizeObserver(updateBoardWidth);
+    observer.observe(container);
+    updateBoardWidth();
+    return () => observer.disconnect();
   }, []);
 
   useEffect(() => {
@@ -346,9 +373,9 @@ export default function ChessHybridApp() {
     }
   }
 
-  async function warmupEngineServer() {
+  async function warmupEngineServer(selectedOpponent = aiOpponent) {
     if (isMultiplayer) return true;
-    if (engineWarmupStatus === "ready") return true;
+    if (engineWarmupStatus === "ready" && engineReadyOpponentRef.current === selectedOpponent) return true;
     if (engineWarmupPromiseRef.current) return engineWarmupPromiseRef.current;
 
     setEngineWarmupStatus("waking");
@@ -356,12 +383,19 @@ export default function ChessHybridApp() {
       .then(async (res) => {
         if (!res.ok) throw new Error(`Health check failed: ${res.status}`);
         const data = await res.json().catch(() => ({}));
-        if (data.model === false) throw new Error("Model is not loaded");
+        if (selectedOpponent === "gemini" && data.gemini?.configured !== true) {
+          throw new Error("Gemini API key is not configured on the backend");
+        }
+        if (selectedOpponent === "chessnet" && data.model === false) {
+          throw new Error("ChessNet model is not loaded");
+        }
+        engineReadyOpponentRef.current = selectedOpponent;
         setEngineWarmupStatus("ready");
         return true;
       })
       .catch((err) => {
         console.error("Engine warmup failed", err);
+        engineReadyOpponentRef.current = "";
         setEngineWarmupStatus("error");
         return false;
       })
@@ -373,30 +407,36 @@ export default function ChessHybridApp() {
     return warmupPromise;
   }
 
-  async function maybePlayEngine(activePlayerColor = playerColor) {
+  async function maybePlayEngine(activePlayerColor = playerColor, selectedOpponent = aiOpponent) {
     if (game.isGameOver()) return;
     if (game.turn() === activePlayerColor) return;
 
     setEngineThinking(true);
     try {
-      const serverReady = await warmupEngineServer();
-      if (!serverReady) throw new Error("Engine server is not ready");
+      const serverReady = await warmupEngineServer(selectedOpponent);
+      if (!serverReady) throw new Error(`${selectedOpponent === "gemini" ? "Gemini" : "ChessNet"} is not ready`);
 
       const engineDepth = Number(depth);
       const candidateCount = Math.max(10, Math.min(16, engineDepth * 3));
       const requestFen = game.fen();
-      const res = await fetch(`${API_BASE_URL}/fastmove`, {
+      const useGemini = selectedOpponent === "gemini";
+      const res = await fetch(`${API_BASE_URL}${useGemini ? "/gemini-move" : "/fastmove"}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fen: requestFen,
-          topk: candidateCount,
-          depth: engineDepth,
-          max_simulations: 96,
-          adaptive: true
-        })
+        body: JSON.stringify(useGemini
+          ? { fen: requestFen }
+          : {
+              fen: requestFen,
+              topk: candidateCount,
+              depth: engineDepth,
+              adaptive: true,
+              ...historyPayload(game)
+            })
       });
-      if (!res.ok) throw new Error(`Engine request failed: ${res.status}`);
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.detail || `AI request failed: ${res.status}`);
+      }
       const data = await res.json();
 
       const uci = data.move || data.moves?.[0]?.uci || data.best_move;
@@ -419,14 +459,21 @@ export default function ChessHybridApp() {
         applyEngineMove(uci, data.fen_after);
       }
     } catch (err) {
-      console.error('Engine request failed', err);
-      const fallback = pickEngineMove(game, Number(depth));
-      if (fallback) {
-        const move = game.move(fallback);
-        if (move) {
-          highlightLastMove(move);
-          syncGame();
-          playMoveSoundFor(move, game);
+      console.error('AI request failed', err);
+      setLastMoveNote(err instanceof Error ? err.message : "AI move failed");
+      if (selectedOpponent === "gemini") {
+        engineReadyOpponentRef.current = "";
+        setEngineWarmupStatus("error");
+      }
+      if (selectedOpponent === "chessnet") {
+        const fallback = pickEngineMove(game, Number(depth));
+        if (fallback) {
+          const move = game.move(fallback);
+          if (move) {
+            highlightLastMove(move);
+            syncGame();
+            playMoveSoundFor(move, game);
+          }
         }
       }
     } finally {
@@ -611,7 +658,7 @@ export default function ChessHybridApp() {
     }
   }
 
-  function newGame(nextColor = playerColor) {
+  function newGame(nextColor = playerColor, selectedOpponent = aiOpponent) {
     safeGameMutate((g) => g.reset());
     setLastMoveSquares({});
     setLastMoveNote("");
@@ -619,7 +666,7 @@ export default function ChessHybridApp() {
     setOptionSquares({});
     setPlayerColor(nextColor);
     if (nextColor === "b") {
-      void maybePlayEngine(nextColor);
+      void maybePlayEngine(nextColor, selectedOpponent);
     }
   }
 
@@ -639,7 +686,14 @@ export default function ChessHybridApp() {
     }
   }
 
-  const status = formatStatus(game, engineThinking, playerColor, isMultiplayer, engineWarmupStatus);
+  const status = formatStatus(
+    game,
+    engineThinking,
+    playerColor,
+    isMultiplayer,
+    engineWarmupStatus,
+    aiOpponentName,
+  );
   const gameEndTheme = gameEndInfo?.tone === "win"
     ? "border-emerald-400/40 bg-emerald-500/15 text-emerald-100"
     : gameEndInfo?.tone === "loss"
@@ -653,8 +707,8 @@ export default function ChessHybridApp() {
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans">
-      <div className="mx-auto grid max-w-7xl gap-6 p-6 lg:grid-cols-[1.2fr_0.8fr]">
-        <Card className="rounded-3xl border-zinc-800 bg-zinc-900 shadow-2xl p-4">
+      <div className="mx-auto grid min-w-0 max-w-7xl gap-6 p-6 lg:grid-cols-[1.2fr_0.8fr]">
+        <Card className="min-w-0 rounded-3xl border-zinc-800 bg-zinc-900 shadow-2xl p-4">
           <CardHeader className="flex flex-row items-center justify-between pb-4">
             <div>
               <CardTitle className="text-2xl font-semibold text-zinc-100">Hybrid Chess Arena</CardTitle>
@@ -663,11 +717,12 @@ export default function ChessHybridApp() {
             <Badge className="rounded-full bg-emerald-500/15 px-3 py-1 text-emerald-300">MVP UI</Badge>
           </CardHeader>
           <CardContent>
-            <div className="rounded-3xl bg-zinc-950 p-4 border border-zinc-800 flex justify-center">
-              <div className="w-full max-w-[600px] relative">
+            <div className="min-w-0 rounded-3xl bg-zinc-950 p-4 border border-zinc-800 flex justify-center">
+              <div ref={boardContainerRef} className="relative min-w-0 w-full max-w-[600px]">
                 <Chessboard
                   id="HybridBoard"
                   position={fen}
+                  boardWidth={boardWidth}
                   onPieceDrop={onDrop}
                   onPieceDragBegin={(piece, square) => {
                     setMoveFrom(square);
@@ -690,8 +745,8 @@ export default function ChessHybridApp() {
                   <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-3 rounded-lg bg-zinc-950/80 text-center backdrop-blur-sm">
                     <Loader2 className="h-9 w-9 animate-spin text-emerald-300" />
                     <div>
-                      <div className="text-base font-semibold text-zinc-100">Loading engine model...</div>
-                      <div className="mt-1 text-sm text-zinc-400">The first move can take a moment on Render.</div>
+                      <div className="text-base font-semibold text-zinc-100">Preparing {aiOpponentName}...</div>
+                      <div className="mt-1 text-sm text-zinc-400">The first move can take a moment.</div>
                     </div>
                   </div>
                 )}
@@ -735,8 +790,8 @@ export default function ChessHybridApp() {
           </CardContent>
         </Card>
 
-        <div className="grid gap-6">
-          <Card className="rounded-3xl border-zinc-800 bg-zinc-900 p-4">
+        <div className="grid min-w-0 gap-6">
+          <Card className="min-w-0 rounded-3xl border-zinc-800 bg-zinc-900 p-4">
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-lg text-zinc-100"><Brain className="h-5 w-5" /> Game Status</CardTitle>
             </CardHeader>
@@ -763,6 +818,27 @@ export default function ChessHybridApp() {
                   {lastMoveNote}
                 </div>
               )}
+              <div>
+                <div className="mb-2 text-sm text-zinc-400 pl-1">AI opponent</div>
+                <Select
+                  value={aiOpponent}
+                  onValueChange={(value) => {
+                    setAiOpponent(value);
+                    engineReadyOpponentRef.current = "";
+                    setEngineWarmupStatus("idle");
+                    newGame(playerColor, value);
+                  }}
+                  disabled={engineThinking || engineWaking || isMultiplayer}
+                >
+                  <SelectTrigger className="w-full justify-between rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="gemini">Gemini 3.8 Flash (default)</SelectItem>
+                    <SelectItem value="chessnet">ChessNet</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <div className="mb-2 text-sm text-zinc-400 pl-1">Play as</div>
@@ -778,7 +854,7 @@ export default function ChessHybridApp() {
                 </div>
                 <div>
                   <div className="mb-2 text-sm text-zinc-400 pl-1">Depth</div>
-                  <Select value={depth} onValueChange={setDepth} disabled={engineThinking}>
+                  <Select value={depth} onValueChange={setDepth} disabled={engineThinking || aiOpponent !== "chessnet"}>
                     <SelectTrigger className="w-full justify-between rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200">
                       <SelectValue />
                     </SelectTrigger>
@@ -800,7 +876,7 @@ export default function ChessHybridApp() {
                 }}>
                   <RotateCcw className="mr-2 h-4 w-4" /> New AI Game
                 </Button>
-                <Button className="flex-1 rounded-xl bg-zinc-800 text-zinc-100 hover:bg-zinc-700 py-2.5 flex justify-center items-center font-medium" onClick={maybePlayEngine} disabled={engineThinking || isMultiplayer || engineWaking}>
+                <Button className="flex-1 rounded-xl bg-zinc-800 text-zinc-100 hover:bg-zinc-700 py-2.5 flex justify-center items-center font-medium" onClick={() => maybePlayEngine()} disabled={engineThinking || isMultiplayer || engineWaking}>
                   <Zap className="mr-2 h-4 w-4" /> AI Move
                 </Button>
               </div>
@@ -825,7 +901,7 @@ export default function ChessHybridApp() {
             </CardContent>
           </Card>
 
-          <Card className="rounded-3xl border-zinc-800 bg-zinc-900 p-4">
+          <Card className="min-w-0 rounded-3xl border-zinc-800 bg-zinc-900 p-4">
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-lg text-zinc-100"><Swords className="h-5 w-5" /> Move List</CardTitle>
             </CardHeader>
@@ -853,7 +929,7 @@ export default function ChessHybridApp() {
             </CardContent>
           </Card>
 
-          <Card className="rounded-3xl border-zinc-800 bg-zinc-900 p-4">
+          <Card className="min-w-0 rounded-3xl border-zinc-800 bg-zinc-900 p-4">
             <CardHeader className="pb-3">
               <CardTitle className="text-lg text-zinc-100">Captured Pieces</CardTitle>
             </CardHeader>

@@ -1,0 +1,130 @@
+"""Play paired local revision matches using one checkpoint and equal simulations.
+
+Superseded by scripts/engine_match.py (parallel games, equal-effort budgets with tree
+reuse, Elo interval); kept for reproducing the 2026-09-22 comparison.
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+import chess
+import chess.pgn
+
+
+def worker(args):
+    import numpy as np
+    import torch
+    from app.core.engine import Engine
+    from app.infra.config import load_config
+    torch.manual_seed(0)
+    np.random.seed(0)
+    config = args.worker_config or args.config
+    engine = Engine(model_path=args.model, cfg=load_config(config), device='cpu', cache_size=0)
+    for line in sys.stdin:
+        request = json.loads(line)
+        board = chess.Board()
+        for move in request['moves']:
+            board.push_uci(move)
+        start = time.perf_counter()
+        result = engine.analyze(board, num_simulations=args.simulations, temperature=0.05)
+        print('MOVE ' + json.dumps({'move': result.best_move.uci() if result.best_move else None,
+                                    'seconds': time.perf_counter() - start}), flush=True)
+
+
+def main(args):
+    out = Path(args.output)
+    out.mkdir(parents=True, exist_ok=True)
+    processes = {}
+    logs = []
+    results = []
+    try:
+        for name, root in [('before', args.before), ('after', str(Path.cwd()))]:
+            env = dict(os.environ, PYTHONPATH=root, PYTHONIOENCODING='utf-8')
+            log = (out / (name + '.log')).open('w', encoding='utf-8')
+            logs.append(log)
+            worker_config = args.before_config if name == 'before' and args.before_config else args.config
+            processes[name] = subprocess.Popen([sys.executable, '-u', str(Path(__file__).resolve()),
+                '--worker', '--model', args.model, '--config', args.config,
+                '--worker-config', worker_config,
+                '--simulations', str(args.simulations)], env=env, stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=log, text=True, encoding='utf-8')
+        openings = ['e2e4 e7e5 g1f3 b8c6', 'd2d4 d7d5 c2c4 e7e6', 'e2e4 c7c5 g1f3 d7d6',
+                    'd2d4 g8f6 c2c4 e7e6', 'e2e4 e7e6 d2d4 d7d5', 'c2c4 e7e5 b1c3 g8f6']
+        for index in range(args.games):
+            white = 'after' if index % 2 == 0 else 'before'
+            black = 'before' if white == 'after' else 'after'
+            board = chess.Board()
+            game = chess.pgn.Game()
+            game.headers.update(Event='Local revision comparison', White=white, Black=black,
+                                TimeControl='-', SimulationBudget=str(args.simulations))
+            node = game
+            for move in openings[(index // 2) % len(openings)].split():
+                board.push_uci(move)
+                node = node.add_variation(board.peek())
+            timings = {'before': 0.0, 'after': 0.0}
+            # Only real endings: a draw the side to move could merely claim is its own decision.
+            while (not board.is_game_over(claim_draw=False) and not board.is_repetition(3)
+                   and board.halfmove_clock < 100 and board.ply() < args.max_plies):
+                name = white if board.turn else black
+                proc = processes[name]
+                proc.stdin.write(json.dumps({'moves': [m.uci() for m in board.move_stack]}) + '\n')
+                proc.stdin.flush()
+                while True:
+                    line = proc.stdout.readline()
+                    if not line:
+                        raise RuntimeError(f'{name} worker exited: {proc.poll()}')
+                    if line.startswith('MOVE '):
+                        reply = json.loads(line[5:])
+                        break
+                move = chess.Move.from_uci(reply['move'])
+                if move not in board.legal_moves:
+                    raise RuntimeError(f'Illegal move {move} from {name}')
+                timings[name] += reply['seconds']
+                board.push(move)
+                node = node.add_variation(move)
+                node.comment = f"{reply['seconds']:.3f} seconds"
+                (out / f'game_{index + 1}.pgn').write_text(str(game), encoding='utf-8')
+                print(json.dumps({'game': index + 1, 'ply': board.ply(), 'side': name, **reply}), flush=True)
+            outcome = board.outcome(claim_draw=False)
+            if outcome is not None:
+                result, termination = outcome.result(), outcome.termination.name
+            elif board.is_repetition(3):
+                result, termination = '1/2-1/2', 'THREEFOLD_REPETITION'
+            elif board.halfmove_clock >= 100:
+                result, termination = '1/2-1/2', 'FIFTY_MOVES'
+            else:
+                result, termination = '*', 'PLY_LIMIT_UNFINISHED'
+            game.headers['Result'] = result
+            game.headers['Termination'] = termination
+            (out / f'game_{index + 1}.pgn').write_text(str(game), encoding='utf-8')
+            row = dict(game=index + 1, white=white, black=black, result=result,
+                       termination=termination, plies=board.ply(), seconds=timings)
+            results.append(row)
+            (out / 'results.json').write_text(json.dumps(results, indent=2), encoding='utf-8')
+            print('RESULT ' + json.dumps(row), flush=True)
+    finally:
+        for proc in processes.values():
+            proc.terminate()
+            proc.wait()
+        for log in logs:
+            log.close()
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--worker', action='store_true')
+    parser.add_argument('--before')
+    parser.add_argument('--before-config', help='config file for the "before" worker (defaults to --config)')
+    parser.add_argument('--worker-config', help=argparse.SUPPRESS)
+    parser.add_argument('--games', type=int, default=4, help='games to play; colours alternate every game')
+    parser.add_argument('--model', default=str(Path('models/best_model.pth').resolve()))
+    parser.add_argument('--config', default=str(Path('config/default.yaml').resolve()))
+    parser.add_argument('--simulations', type=int, default=64)
+    parser.add_argument('--max-plies', type=int, default=200)
+    parser.add_argument('--output', default='data/evaluations/local_revision_match')
+    arguments = parser.parse_args()
+    worker(arguments) if arguments.worker else main(arguments)

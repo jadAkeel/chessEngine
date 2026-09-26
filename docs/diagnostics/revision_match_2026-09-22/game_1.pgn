@@ -1,0 +1,12 @@
+[Event "Local revision comparison"]
+[Site "?"]
+[Date "????.??.??"]
+[Round "?"]
+[White "after"]
+[Black "before"]
+[Result "1-0"]
+[TimeControl "-"]
+[SimulationBudget "64"]
+[Termination "CHECKMATE"]
+
+1. e4 e5 2. Nf3 Nc6 3. d4 { 0.854 seconds } 3... exd4 { 1.304 seconds } 4. Nxd4 { 1.116 seconds } 4... Nf6 { 2.045 seconds } 5. Nc3 { 1.213 seconds } 5... Bb4 { 2.121 seconds } 6. Nxc6 { 1.202 seconds } 6... dxc6 { 1.869 seconds } 7. Qxd8+ { 1.102 seconds } 7... Kxd8 { 1.046 seconds } 8. Bg5 { 1.037 seconds } 8... Bxc3+ { 1.571 seconds } 9. bxc3 { 0.961 seconds } 9... Be6 { 1.527 seconds } 10. e5 { 1.064 seconds } 10... h6 { 1.715 seconds } 11. Bxf6+ { 1.048 seconds } 11... gxf6 { 1.047 seconds } 12. exf6 { 0.982 seconds } 12... Kd7 { 1.522 seconds } 13. O-O-O+ { 1.155 seconds } 13... Ke8 { 1.050 seconds } 14. Bd3 { 1.007 seconds } 14... Rd8 { 1.844 seconds } 15. Rhe1 { 1.805 seconds } 15... Kf8 { 2.408 seconds } 16. f4 { 1.305 seconds } 16... Bxa2 { 1.998 seconds } 17. Kb2 { 1.259 seconds } 17... Bd5 { 1.976 seconds } 18. g3 { 1.209 seconds } 18... Re8 { 1.942 seconds } 19. Rxe8+ { 1.128 seconds } 19... Kxe8 { 1.086 seconds } 20. Re1+ { 1.109 seconds } 20... Kf8 { 1.076 seconds } 21. c4 { 1.087 seconds } 21... Be6 { 1.600 seconds } 22. f5 { 1.075 seconds } 22... Bd7 { 1.450 seconds } 23. Re7 { 1.044 seconds } 23... Bc8 { 1.220 seconds } 24. Rxc7 { 0.810 seconds } 24... Bxf5 { 0.878 seconds } 25. Bxf5 { 0.576 seconds } 25... h5 { 1.106 seconds } 26. Rc8# { 0.002 seconds } 1-0

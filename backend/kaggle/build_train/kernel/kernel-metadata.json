@@ -1,0 +1,20 @@
+{
+  "id": "jadakil/chess-elite-training",
+  "title": "Chess Elite Training",
+  "code_file": "elite_training.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "jadakil/chess-engine-code",
+    "jadakil/chess-elite-21m",
+    "jadakil/chess-elite-checkpoints"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [
+    "jadakil/chess-elite-dataset-generation",
+    "jadakil/chess-elite-gen-2025-09"
+  ]
+}

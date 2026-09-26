@@ -52,11 +52,12 @@ class Engine:
     ):
         self.device = get_default_device(device)
         self.cfg = self._resolve_config(model=model, cfg=cfg)
+        self._explicit_config = cfg is not None
         validate_config(self.cfg)
         configure_torch_runtime(self.cfg, device=str(self.device), role='engine', worker_count=1)
         self.model = model or ChessNet(self.cfg)
         self.cache_size = max(0, int(cache_size))
-        self._analysis_cache: OrderedDict[tuple[str, int, float], AnalysisResult] = OrderedDict()
+        self._analysis_cache: OrderedDict[tuple, AnalysisResult] = OrderedDict()
 
         if model_path:
             self._load_model_weights(model_path=model_path, allow_partial_weights=allow_partial_weights)
@@ -81,7 +82,7 @@ class Engine:
         try:
             data = load_checkpoint(path, self.model, device=self.device)
             checkpoint_cfg = data.get("config")
-            if checkpoint_cfg is not None:
+            if checkpoint_cfg is not None and not self._explicit_config:
                 self.cfg = checkpoint_cfg
                 setattr(self.model, "cfg", checkpoint_cfg)
             return
@@ -116,10 +117,10 @@ class Engine:
         return resolved
 
     @staticmethod
-    def _cache_key(board: chess.Board, num_simulations: int, temperature: float) -> tuple[str, int, float]:
-        return (board.fen(), int(num_simulations), float(temperature))
+    def _cache_key(board: chess.Board, num_simulations: int, temperature: float) -> tuple:
+        return (board.fen(), tuple(board.move_stack), int(num_simulations), float(temperature))
 
-    def _cache_get(self, key: tuple[str, int, float]) -> AnalysisResult | None:
+    def _cache_get(self, key: tuple) -> AnalysisResult | None:
         if self.cache_size <= 0:
             return None
         result = self._analysis_cache.get(key)
@@ -127,7 +128,7 @@ class Engine:
             self._analysis_cache.move_to_end(key)
         return result
 
-    def _cache_put(self, key: tuple[str, int, float], value: AnalysisResult) -> None:
+    def _cache_put(self, key: tuple, value: AnalysisResult) -> None:
         if self.cache_size <= 0:
             return
         self._analysis_cache[key] = value
@@ -141,17 +142,19 @@ class Engine:
         add_noise: bool = False,
         num_simulations: int | None = None,
         temperature: float = 1.0,
+        time_limit_sec: float | None = None,
     ) -> AnalysisResult:
         board = self._validate_board(board)
         sims = self._resolve_simulations(num_simulations)
-        cache_key = None if add_noise else self._cache_key(board, sims, temperature)
+        cache_key = None if add_noise or time_limit_sec is not None else self._cache_key(board, sims, temperature)
 
         if cache_key is not None:
             cached = self._cache_get(cache_key)
             if cached is not None:
                 return cached
 
-        result = self.mcts.search(board=board, add_noise=add_noise, num_simulations=sims, temperature=temperature)
+        search_kwargs = {} if time_limit_sec is None else {"time_limit_sec": time_limit_sec}
+        result = self.mcts.search(board=board, add_noise=add_noise, num_simulations=sims, temperature=temperature, **search_kwargs)
         effective_policy = result.get("adjusted_policy_target") or result["policy_target"]
         analysis = AnalysisResult(
             best_move=result["best_move"],

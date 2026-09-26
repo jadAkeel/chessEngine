@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import copy
+import time
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -142,6 +145,10 @@ def _smart_horizontal_flip(states, policies):
     batch_size = states.size(0)
     device = states.device
     mask = torch.rand(batch_size, device=device) < 0.5
+    # File reflection moves the king from e to d: standard castling is no longer
+    # legal in the reflected position. Only augment positions without rights.
+    has_castling_rights = states[:, 13:17].ne(0).flatten(1).any(dim=1)
+    mask &= ~has_castling_rights
     if not mask.any():
         return states, policies
     idx = mask.nonzero(as_tuple=True)[0]
@@ -159,6 +166,49 @@ def _smart_horizontal_flip(states, policies):
     mapping_t = _hflip_index_map_tensor(device)
     policies[idx] = policies[idx].index_select(1, mapping_t)
     return states, policies
+
+
+# A non-finite forward pass still updates BatchNorm running stats, so skipping
+# the optimizer step (what GradScaler does) is not enough: the Kaggle run of
+# 2026-09-23 went NaN mid-iteration and every later evaluation was NaN. Keep a
+# known-good copy of the weights and roll back to it instead.
+GOOD_STATE_EVERY = 500
+PARAM_CHECK_EVERY = 50
+MAX_NONFINITE_STEPS = 200
+
+
+DEBUG_EVERY = 50
+
+
+def _forward_module(model, device):
+    """The module to run training batches through: ``nn.DataParallel`` over every
+    visible GPU when there is more than one (Kaggle gives two T4s), else the model.
+
+    The wrapper shares the model's parameters, so the optimizer, checkpoints and
+    state_dict keys are unchanged; only the forward pass is split across GPUs.
+    """
+    if not str(device).startswith('cuda') or not torch.cuda.is_available() or torch.cuda.device_count() < 2:
+        return model
+    print(f"[TRAIN] DataParallel over {torch.cuda.device_count()} GPUs", flush=True)
+    return torch.nn.DataParallel(model)
+
+
+def _params_finite(model) -> bool:
+    checks = [torch.isfinite(t).all() for t in model.state_dict().values() if t.is_floating_point()]
+    return bool(torch.stack(checks).all().item()) if checks else True
+
+
+def _snapshot_good_state(model, optimizer):
+    return (
+        {k: v.detach().clone() for k, v in model.state_dict().items()},
+        copy.deepcopy(optimizer.state_dict()),
+    )
+
+
+def _restore_good_state(model, optimizer, snapshot) -> None:
+    model.load_state_dict(snapshot[0])
+    # load_state_dict may alias same-device tensors; keep the snapshot pristine.
+    optimizer.load_state_dict(copy.deepcopy(snapshot[1]))
 
 
 def train_model(
@@ -204,6 +254,22 @@ def train_model(
     beta_start = float(cfg.replay.beta_start)
     beta_end = float(cfg.replay.beta_end)
 
+    if not _params_finite(model):
+        raise RuntimeError("Model weights are already non-finite before training; refusing to train")
+    good_state = _snapshot_good_state(model, optimizer)
+    nonfinite_steps = 0
+
+    def _roll_back(reason: str) -> None:
+        nonlocal nonfinite_steps
+        nonfinite_steps += 1
+        _restore_good_state(model, optimizer, good_state)
+        print(f"[TRAIN GUARD] step={step} {reason}; rolled back to last good weights ({nonfinite_steps} so far)")
+        if nonfinite_steps > MAX_NONFINITE_STEPS:
+            raise RuntimeError(f"Training diverged: {nonfinite_steps} non-finite steps in one iteration")
+
+    forward = _forward_module(model, device)
+    window_started = time.perf_counter()
+
     for step in range(total_steps):
         beta = beta_start + (beta_end - beta_start) * min(1.0, global_step / 2000.0)
 
@@ -227,7 +293,14 @@ def train_model(
         optimizer.zero_grad(set_to_none=True)
 
         with autocast(device_type='cuda', enabled=use_amp):
-            pred_policies, pred_values = model(states)
+            try:
+                pred_policies, pred_values = forward(states)
+            except RuntimeError as exc:
+                if forward is model:
+                    raise
+                print(f"[TRAIN] DataParallel failed ({exc}); continuing on one GPU", flush=True)
+                forward = model
+                pred_policies, pred_values = model(states)
 
             if isinstance(policies, SparsePolicyBatchTensor):
                 per_sample_policy, log_probs, pred_probs, entropy = _sparse_policy_loss(
@@ -242,22 +315,25 @@ def train_model(
                     label_smoothing,
                 )
 
-            with torch.no_grad():
-                pred_value_mean = float(pred_values.mean().item())
-                pred_value_std = float(pred_values.std().item())
-                pred_value_abs = float(pred_values.abs().mean().item())
+            # Each .item() waits for the GPU; only collect the debug stats when printed.
+            log_debug = step % DEBUG_EVERY == 0
+            if log_debug:
+                with torch.no_grad():
+                    pred_value_mean = float(pred_values.mean().item())
+                    pred_value_std = float(pred_values.std().item())
+                    pred_value_abs = float(pred_values.abs().mean().item())
 
-                target_value_mean = float(values.mean().item())
-                target_value_std = float(values.std().item())
+                    target_value_mean = float(values.mean().item())
+                    target_value_std = float(values.std().item())
 
-                top_k = min(2, pred_probs.size(1))
-                top_probs, _ = torch.topk(pred_probs, k=top_k, dim=1)
-                top1_mean = float(top_probs[:, 0].mean().item())
-                top2_mean = float(top_probs[:, 1].mean().item()) if top_k > 1 else 0.0
-                gap_mean = float((top_probs[:, 0] - top_probs[:, 1]).mean().item()) if top_k > 1 else 0.0
+                    top_k = min(2, pred_probs.size(1))
+                    top_probs, _ = torch.topk(pred_probs, k=top_k, dim=1)
+                    top1_mean = float(top_probs[:, 0].mean().item())
+                    top2_mean = float(top_probs[:, 1].mean().item()) if top_k > 1 else 0.0
+                    gap_mean = float((top_probs[:, 0] - top_probs[:, 1]).mean().item()) if top_k > 1 else 0.0
 
-                entropy_val = float((-(pred_probs * log_probs).sum(dim=1)).mean().item())
-                draw_ratio = float((values.abs() < 0.1).float().mean().item())
+                    entropy_val = float((-(pred_probs * log_probs).sum(dim=1)).mean().item())
+                    draw_ratio = float((values.abs() < 0.1).float().mean().item())
 
             per_sample_value = F.mse_loss(pred_values, values, reduction='none').squeeze(1)
 
@@ -265,11 +341,22 @@ def train_model(
             value_loss = (is_weights * per_sample_value).mean()
             loss = policy_loss + value_loss_coeff * value_loss - entropy_coeff * entropy
 
+        if not bool(torch.isfinite(loss).item()):
+            _roll_back("non-finite loss")
+            continue
+
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
         scaler.step(optimizer)
         scaler.update()
+
+        if step % PARAM_CHECK_EVERY == 0:
+            if not _params_finite(model):
+                _roll_back("non-finite weights after optimizer step")
+                continue
+            if step % GOOD_STATE_EVERY == 0:
+                good_state = _snapshot_good_state(model, optimizer)
 
         if scheduler is not None and cfg.training.step_scheduler_per_batch:
             scheduler.step()
@@ -285,9 +372,13 @@ def train_model(
 
         global_step += 1
 
-        if step % 50 == 0:
+        if log_debug:
+            now = time.perf_counter()
+            sec_per_step = (now - window_started) / (DEBUG_EVERY if step else 1)
+            window_started = now
             print(
                 f"[TRAIN DEBUG] step={step} "
+                f"sec_per_step={sec_per_step:.3f} "
                 f"pred_value_mean={pred_value_mean:.3f} "
                 f"pred_value_std={pred_value_std:.3f} "
                 f"pred_value_abs={pred_value_abs:.3f} "
@@ -297,7 +388,8 @@ def train_model(
                 f"top2={top2_mean:.3f} "
                 f"gap={gap_mean:.3f} "
                 f"entropy={entropy_val:.3f} "
-                f"draw_ratio={draw_ratio:.3f}"
+                f"draw_ratio={draw_ratio:.3f}",
+                flush=True,
             )
 
     if not losses:
@@ -321,6 +413,7 @@ def train_model(
         'steps': len(losses),
         'global_step': global_step,
         'amp_enabled': bool(use_amp),
+        'nonfinite_steps': nonfinite_steps,
     }
 
 

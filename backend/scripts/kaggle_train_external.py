@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -25,6 +26,49 @@ REQUIRED_AUTOSAVE_FILES = (
 
 def _backend_dir() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def _resolve_python() -> str:
+    """Pick an interpreter that can actually import the training dependencies.
+
+    Probing beats trusting ``sys.executable``: a subprocess that cannot import
+    chess would otherwise fail only after setup work. The Kaggle image ships
+    without python-chess, so install it before calling this.
+    """
+    override = os.environ.get("CHESS_TRAIN_PYTHON")
+    candidates = [override] if override else []
+    candidates.append(sys.executable)
+    candidates.extend(
+        path
+        for path in (
+            shutil.which("python"),
+            shutil.which("python3"),
+            "/opt/conda/bin/python",
+            "/usr/local/bin/python",
+            "/usr/bin/python3",
+        )
+        if path
+    )
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        probe = subprocess.run(
+            [candidate, "-c", "import chess, numpy, torch"],
+            capture_output=True,
+            text=True,
+        )
+        if probe.returncode == 0:
+            print(f"[PYTHON] using {candidate}", flush=True)
+            return candidate
+        print(f"[PYTHON] rejected {candidate}: {probe.stderr.strip().splitlines()[-1:]}", flush=True)
+
+    raise RuntimeError(
+        "No interpreter could import chess/numpy/torch. "
+        "Set CHESS_TRAIN_PYTHON to a working interpreter."
+    )
 
 
 def _run(cmd: list[str], *, cwd: Path, env: dict[str, str], check: bool = True) -> subprocess.CompletedProcess:
@@ -63,12 +107,19 @@ def _find_external_samples() -> str:
     input_root = Path("/kaggle/input")
     candidates = []
     if input_root.exists():
+        # First check explicitly for external_samples.npz
         for path in input_root.rglob("external_samples.npz"):
             if path.is_dir() or path.is_file():
                 candidates.append(path)
+        # If not found, check for directories containing shard_*.npz
+        if not candidates:
+            for shard_file in input_root.rglob("shard_*.npz"):
+                parent_dir = shard_file.parent
+                if parent_dir not in candidates:
+                    candidates.append(parent_dir)
     if not candidates:
         raise FileNotFoundError(
-            "Could not auto-find external_samples.npz under /kaggle/input. "
+            "Could not auto-find external_samples.npz or shard_*.npz under /kaggle/input. "
             "Pass --samples-path explicitly."
         )
     candidates.sort(key=lambda p: (0 if p.is_dir() else 1, len(str(p)), str(p)))
@@ -141,6 +192,19 @@ def _write_config(args: argparse.Namespace) -> Path:
         f"  batch_size: {int(args.batch_size)}",
         f"  epochs: {int(args.epochs)}",
         f"  train_steps_per_iter: {int(args.train_steps_per_iter)}",
+        *([f"  lr: {float(args.lr)}"] if getattr(args, "lr", None) is not None else []),
+        # fp16 AMP overflowed once the trunk activations reached ~18k (v2 iter 10, v3).
+        *(["  use_amp: false"] if getattr(args, "no_amp", False) else []),
+        "",
+        # ReplayBuffer preallocates replay.capacity upfront, so it must track
+        # buffer_size; leaving the default would reserve the full 5M states
+        # (~12.8 GB) no matter how few samples are streamed in.
+        "replay:",
+        f"  capacity: {int(args.buffer_size)}",
+        # The buffer is refilled from shuffled shards every iteration, so the
+        # self-play "recent window" (80 % of each batch from the last 800k
+        # samples streamed) would only oversample a few shards. Sample uniformly.
+        "  recent_sample_fraction: 0.0",
         "",
         "system:",
         f"  checkpoint_path: {_yaml_string(Path(args.save_dir) / 'external_best_model.pth')}",
@@ -168,8 +232,13 @@ def _copy_checkpoint_inputs(args: argparse.Namespace) -> str | None:
                 shutil.copy2(src, dst)
                 print(f"[CHECKPOINT] copied {src} -> {dst}", flush=True)
         latest = save_dir / "external_latest_checkpoint.pth"
+        best = save_dir / "external_best_model.pth"
         if base_model is None and latest.exists():
             base_model = str(latest)
+        elif base_model is None and best.exists():
+            # A best-model-only dataset must still resume, not train from scratch.
+            base_model = str(best)
+            print(f"[CHECKPOINT] no latest checkpoint; resuming from best model {best}", flush=True)
 
     if base_model and not Path(base_model).exists():
         raise FileNotFoundError(f"Base model not found: {base_model}")
@@ -278,6 +347,17 @@ def _autosave_kaggle(
         print(result.stdout, flush=True)
 
 
+def _fits_time_budget(elapsed_sec: float, slowest_iteration_sec: float, budget_hours: float) -> bool:
+    """Whether one more iteration (as slow as the slowest so far) ends inside the budget.
+
+    A Kaggle session killed at its time limit may lose the kernel output, so
+    stopping cleanly beats starting an iteration that cannot finish.
+    """
+    if budget_hours <= 0:
+        return True
+    return elapsed_sec + slowest_iteration_sec <= budget_hours * 3600.0
+
+
 def _train_one_iteration(
     args: argparse.Namespace,
     config_path: Path,
@@ -286,7 +366,7 @@ def _train_one_iteration(
     iteration: int,
 ) -> None:
     cmd = [
-        sys.executable,
+        _resolve_python(),
         "-m",
         "app.cli.train_external",
         "--config",
@@ -352,6 +432,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kaggle-dataset-id", default=DEFAULT_KAGGLE_DATASET_ID)
     parser.add_argument("--kaggle-dataset-title", default=None)
     parser.add_argument("--delete-old-versions", action="store_true")
+    parser.add_argument("--lr", type=float, default=None, help="Override training.lr")
+    parser.add_argument("--no-amp", action="store_true", help="Train in fp32 (no fp16 autocast)")
+    parser.add_argument(
+        "--time-budget-hours", type=float, default=0.0,
+        help="Stop before an iteration that would not finish inside this budget (0 = no limit)",
+    )
     return parser
 
 
@@ -370,7 +456,7 @@ def main() -> None:
     env.setdefault("PYTHONIOENCODING", "utf-8")
 
     if args.install_requirements:
-        _run([sys.executable, "-m", "pip", "install", "-r", TRAINING_REQUIREMENTS_FILE], cwd=_backend_dir(), env=env)
+        _run([_resolve_python(), "-m", "pip", "install", "-r", TRAINING_REQUIREMENTS_FILE], cwd=_backend_dir(), env=env)
 
     if args.device == "cuda":
         _verify_training_runtime(args.device, env)
@@ -388,23 +474,41 @@ def main() -> None:
     print(f"[START] save_dir={save_dir}", flush=True)
     print(f"[START] iterations={args.iterations}", flush=True)
 
+    started = time.monotonic()
+    slowest_iteration = 0.0
     for iteration in range(1, int(args.iterations) + 1):
+        if not _fits_time_budget(time.monotonic() - started, slowest_iteration, args.time_budget_hours):
+            print(
+                f"[LOOP] stopping before iteration {iteration}: another ~{slowest_iteration / 3600:.1f} h "
+                f"would exceed the {args.time_budget_hours} h budget",
+                flush=True,
+            )
+            break
         print(f"[LOOP] iteration {iteration}/{args.iterations}", flush=True)
+        iteration_start = time.monotonic()
         _train_one_iteration(args, config_path, base_model, env, iteration)
 
         if args.autosave != "off" and iteration % int(args.autosave_every) == 0:
             if args.autosave in {"local", "both"}:
                 _autosave_local(save_dir, autosave_dir, iteration)
             if args.autosave in {"kaggle", "both"}:
-                _autosave_kaggle(
-                    save_dir,
-                    autosave_dir,
-                    args.kaggle_dataset_id,
-                    dataset_title,
-                    iteration,
-                    delete_old_versions=bool(args.delete_old_versions),
-                    env=env,
-                )
+                try:
+                    _autosave_kaggle(
+                        save_dir,
+                        autosave_dir,
+                        args.kaggle_dataset_id,
+                        dataset_title,
+                        iteration,
+                        delete_old_versions=bool(args.delete_old_versions),
+                        env=env,
+                    )
+                except (RuntimeError, FileNotFoundError, OSError) as exc:
+                    # With a local archive already written, a failed upload must
+                    # not abort hours of remaining training.
+                    if args.autosave != "both":
+                        raise
+                    print(f"[AUTOSAVE] Kaggle upload failed, local archive kept: {exc}", flush=True)
+        slowest_iteration = max(slowest_iteration, time.monotonic() - iteration_start)
 
     print("[DONE] Kaggle external training finished", flush=True)
 

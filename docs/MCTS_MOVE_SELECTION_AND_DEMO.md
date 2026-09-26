@@ -34,9 +34,13 @@ mcts:
   num_simulations: 256
   c_puct: 1.8
   temperature: 1.0
-  inference_batch_size: 24
+  inference_batch_size: 16
   classical_value_alpha: 0.35
+  fpu_reduction: 0.25
+  reuse_tree: true
 ```
+
+The tree is retained between searches: a search on the same position continues it, and a search after the played move and the reply starts from that subtree (see [SEARCH_STRENGTH_2026-09-22.md](SEARCH_STRENGTH_2026-09-22.md)).
 
 The API can use smaller or adaptive simulation budgets for interactive speed.
 
@@ -46,8 +50,9 @@ During selection, each child receives a score based on:
 
 - `Q`: the average value from previous simulations
 - `U`: exploration bonus from the policy prior
-- virtual-loss penalty for in-flight batched simulations
-- move penalties for risky or unproductive moves
+- in-flight (virtual) visits counted as losses diluted by the child's real visits
+- first-play urgency: an unvisited child starts from the parent's value minus `fpu_reduction`
+- move penalties for risky or unproductive moves, computed once per node and cached on the edge
 
 The core idea is:
 

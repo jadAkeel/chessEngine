@@ -54,6 +54,8 @@ principle_penalties:
   piece_activity: 0.025
   rook_activity: 0.045
   endgame: 0.040
+  # principle heuristics bias selection at the root and the next two plies only
+  max_tree_depth: 2
 
 
 mcts:
@@ -65,11 +67,18 @@ mcts:
   classical_value_alpha: 0.35
   resign_threshold: -0.965
   min_resign_plies: 60
-  inference_batch_size: 24
+  # Upper bound; with batch_growth each search starts at 4 and grows toward it.
+  inference_batch_size: 16
+  batch_growth: true
   virtual_loss: 1.0
+  fpu_reduction: 0.25
+  reuse_tree: true
   queen_blunder_penalty: 0.85
   queen_hanging_penalty: 0.62
   queen_sac_compensation_threshold: 900
+  # Checks are forcing: the 2-ply exchange estimate behind the tactical penalty is least
+  # reliable there, and penalising checking sacrifices hid forced mates (2/11 -> 5/11).
+  queen_check_discount: 0.0
   piece_penalties:
     PAWN:
       blunder_penalty: 0.08
@@ -137,3 +146,6 @@ system:
   default_bestmove_simulations: 32
   max_halfmove: 80
   max_fullmove: 120
+  # Hybrid P/E-core CPUs collapse under oversubscription (measured: 8 threads = 3.6s per
+  # single-board inference on an i5-1235U, 4 threads = 79ms). Keep inference at 4 threads.
+  cpu_threads: 4

@@ -33,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--shard-size", type=int, default=100000)
     parser.add_argument("--min-fullmove", type=int, default=5)
     parser.add_argument("--max-fullmove", type=int, default=0)
+    parser.add_argument("--min-elo", type=int, default=0, help="Minimum player Elo rating (checks WhiteElo and BlackElo)")
     parser.add_argument("--skip-draws", action="store_true")
     return parser
 
@@ -118,7 +119,7 @@ def main() -> None:
 
     start_time = time.time()
 
-    print("\n[START] Importing PGN → shards")
+    print("\n[START] Importing PGN -> shards")
     print(f"[INPUT] {input_path}")
     print(f"[OUTPUT DIR] {output_dir}")
     print(f"[CONFIG] shard_size={shard_size}, max_samples={args.max_samples}\n")
@@ -142,6 +143,15 @@ def main() -> None:
 
             if args.skip_draws and result == "1/2-1/2":
                 continue
+
+            if args.min_elo > 0:
+                try:
+                    w_elo = int((game.headers.get("WhiteElo") or "0").strip())
+                    b_elo = int((game.headers.get("BlackElo") or "0").strip())
+                    if w_elo < args.min_elo or b_elo < args.min_elo:
+                        continue
+                except (ValueError, TypeError):
+                    continue
 
             board = game.board()
 
@@ -189,7 +199,7 @@ def main() -> None:
 
             # 🔥 game log
             if total_games % 100 == 0:
-                print(f"[GAME] #{total_games} → samples from game={game_samples}")
+                print(f"[GAME] #{total_games} -> samples from game={game_samples}")
 
         # 🔥 last shard
         if states:

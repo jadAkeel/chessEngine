@@ -26,6 +26,7 @@ BUFFER_SIZE = 5000000
 MAX_SAMPLES = 75000000
 MIN_FULLMOVE = 0
 MAX_FULLMOVE = 0
+DOWNLOAD_FRESH_TACTICAL_DATA = False
 AUTOSAVE_MODE = "kaggle"
 AUTOSAVE_EVERY = 1
 DELETE_OLD_KAGGLE_VERSIONS = True
@@ -149,7 +150,11 @@ SAMPLES_PATH = first_existing([DATA_DIR / "external_samples.npz"])
 if SAMPLES_PATH is None:
     SAMPLES_PATH = find_first_named(KAGGLE_INPUT_ROOT, "external_samples.npz")
 if SAMPLES_PATH is None:
-    raise FileNotFoundError("external_samples.npz was not found under the old Kaggle input. TODO: attach the dataset that contains backend/data/external_samples.npz.")
+    for p in KAGGLE_INPUT_ROOT.rglob("shard_*.npz"):
+        SAMPLES_PATH = p.parent
+        break
+if SAMPLES_PATH is None and not DOWNLOAD_FRESH_TACTICAL_DATA:
+    raise FileNotFoundError("Training samples were not found under /kaggle/input. Either attach a dataset containing external_samples.npz or shard_*.npz, or set DOWNLOAD_FRESH_TACTICAL_DATA = True.")
 
 external_ckpt_dir = MODEL_DIR / "external"
 if (external_ckpt_dir / "external_latest_checkpoint.pth").exists() or (external_ckpt_dir / "external_best_model.pth").exists():
@@ -208,6 +213,19 @@ print("CWD =", Path.cwd())
 
 run([sys.executable, "-m", "pip", "install", "-r", "requirements2_kaggle.txt"], cwd=BACKEND_DIR)
 verify_training_runtime()
+
+if DOWNLOAD_FRESH_TACTICAL_DATA:
+    fresh_shards_dir = OUTPUT_DIR / "fresh_tactical_shards"
+    print(f"[FRESH DATA] Downloading and preparing fresh tactical and GM shards into {fresh_shards_dir}...", flush=True)
+    run([
+        sys.executable,
+        "scripts/download_and_prepare_dataset.py",
+        "--type", "all",
+        "--max-puzzle-samples", "1000000",
+        "--max-gm-samples", "500000",
+        "--output-dir", str(fresh_shards_dir),
+    ], cwd=BACKEND_DIR)
+    SAMPLES_PATH = fresh_shards_dir
 
 link_path_if_available(SAMPLES_PATH, BACKEND_DIR / "data" / "external_samples.npz")
 

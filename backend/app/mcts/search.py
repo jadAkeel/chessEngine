@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from collections.abc import Iterable, Mapping
 
 import chess
@@ -11,7 +12,8 @@ from app.evaluation.metrics import evaluate_board
 from app.game.move_encoding import move_to_index
 from app.game.principles import principle_penalty_components
 from app.game.repetition import PositionKey, build_seen_positions, current_repetition_count, filter_repetition_moves, position_key
-from app.infra.config import AppConfig, get_current_config
+from app.game.tactics import TacticalSearchExpired, find_forcing_mate_in_two, find_mate_in_one, select_safe_move
+from app.infra.config import AppConfig, get_current_config, normalize_penalty_mode
 from app.mcts.node import Node
 from app.mcts.temperature import apply_temperature
 from app.model.inference import predict_boards
@@ -33,16 +35,103 @@ PIECE_CONFIG_NAMES = {
     chess.QUEEN: "QUEEN",
 }
 
+# Below this root value the mover is worse; a draw by repetition is then
+# acceptable and the root anti-repetition filter is skipped (play mode only).
+REPETITION_FILTER_MIN_ROOT_VALUE = -0.05
+
+PENALTY_MODES = ("offset", "progressive", "off")
+
+# Smart pruning only engages once the search has this many completed rollouts.
+SMART_PRUNING_MIN_VISITS = 16
+
+# Exchanges within this many centipawns of even carry no tactical penalty.
+EVEN_TRADE_TOLERANCE_CP = 50
+
+# Batch growth: batch = clamp(root visits // divisor, min, inference_batch_size), i.e. 4 up
+# to 64 visits, then growing to 16 by 256. Starting at 2 bought nothing measurable on the
+# tactical suite and cost per-call overhead.
+BATCH_GROWTH_MIN = 4
+BATCH_GROWTH_DIVISOR = 16
+
+# A root move needs this share of the top move's visits before its value may
+# overrule the visit order (KataGo uses 0.15).
+LCB_MIN_VISIT_FRACTION = 0.15
+
+# Search depth (plies below the new root) scanned for a FEN-only board's position
+# inside the retained tree: our move plus the opponent's reply.
+FEN_REUSE_MAX_DEPTH = 2
+
+
+def bare_king_value(board: chess.Board) -> float | None:
+    """Graded value, side to move's view, when a queen or rook side faces a bare king.
+
+    The network rates all such positions about the same (~0.85), so the search has
+    no gradient and shuffles (a won K+Q v K was not converted in 30 plies). Rewarding
+    a cornered weak king and close kings (mop-up) gives the search a direction; the
+    value stays below 1.0 so an actual mate is always preferred.
+    """
+    for strong in (chess.WHITE, chess.BLACK):
+        weak = not strong
+        if chess.popcount(board.occupied_co[weak]) != 1:
+            continue
+        if not (board.pieces_mask(chess.QUEEN, strong) or board.pieces_mask(chess.ROOK, strong)):
+            continue
+        weak_king, strong_king = board.king(weak), board.king(strong)
+        if weak_king is None or strong_king is None:
+            return None
+        file_index, rank_index = chess.square_file(weak_king), chess.square_rank(weak_king)
+        from_centre = max(3 - file_index, file_index - 4) + max(3 - rank_index, rank_index - 4)  # 0..6
+        king_gap = chess.square_manhattan_distance(weak_king, strong_king)  # 2..14
+        progress = (10.0 * from_centre + 4.0 * (14 - king_gap)) / 116.0
+        value = 0.55 + 0.4 * progress
+        return value if board.turn == strong else -value
+    return None
+
 
 class MCTS:
+    """PUCT search.
+
+    Two modes, chosen per call by ``add_noise``:
+
+    * play (``add_noise=False``): repetitions are handled as draws (a position
+      repeated inside the search path, or a third occurrence overall), the move
+      is the most-visited child, and heuristic penalties shape exploration as
+      configured by ``mcts.penalty_mode``;
+    * self-play (``add_noise=True``): the legacy behaviour used to generate
+      training data (repetition/progress edge penalties, anti-repetition root
+      policy), kept unchanged so training targets do not shift.
+    """
+
     def __init__(self, model, cfg: AppConfig | None = None, device: str = "cpu", c_puct: float | None = None):
         self.model = model
         self.cfg = cfg or getattr(model, "cfg", None) or get_current_config()
         self.device = device
         self.c_puct = float(c_puct if c_puct is not None else self.cfg.mcts.c_puct)
         self.virtual_loss = max(0.0, float(getattr(self.cfg.mcts, "virtual_loss", 1.0)))
+        self.fpu_reduction = max(0.0, float(getattr(self.cfg.mcts, "fpu_reduction", 0.25)))
+        self.reuse_tree = bool(getattr(self.cfg.mcts, "reuse_tree", True))
+        self.penalty_mode = normalize_penalty_mode(getattr(self.cfg.mcts, "penalty_mode", "offset"))
+        if self.penalty_mode not in PENALTY_MODES:
+            raise ValueError(f"mcts.penalty_mode must be one of {PENALTY_MODES}")
+        self.twofold_draw = bool(getattr(self.cfg.mcts, "twofold_draw", True))
+        self.smart_pruning = bool(getattr(self.cfg.mcts, "smart_pruning", True))
+        self.lcb_scale = max(0.0, float(getattr(self.cfg.mcts, "lcb_scale", 1.0)))
+        self.batch_growth = bool(getattr(self.cfg.mcts, "batch_growth", True))
+        self.mopup = bool(getattr(self.cfg.mcts, "mopup_endgames", True))
+        principles_cfg = getattr(self.cfg, "principle_penalties", None)
+        self.principle_max_depth = int(getattr(principles_cfg, "max_tree_depth", 2))
         self.logger = logging.getLogger(__name__)
-        self._tactical_penalty_cache: dict[tuple[PositionKey, str], float] = {}
+        self._training_mode = False
+        # Per-search compute caches (cleared every search). Node-level caches persist with the tree.
+        self._tactical_penalty_cache: dict[tuple[PositionKey, str, int], float] = {}
+        self._position_tactical_cache: dict[tuple[PositionKey, str], float] = {}
+        self._principle_penalty_cache: dict[tuple, dict[str, float]] = {}
+        # Retained tree for reuse between consecutive searches.
+        self._root: Node | None = None
+        self._root_stack: tuple[chess.Move, ...] | None = None
+        self._root_board: chess.Board | None = None
+
+    # ------------------------------------------------------------------ config helpers
 
     def _get_piece_penalty_cfg(self, piece_type: chess.PieceType) -> dict[str, float] | None:
         if piece_type == chess.KING:
@@ -74,13 +163,10 @@ class MCTS:
             "check_discount": float(custom.get("check_discount", fallback["check_discount"])),
         }
 
+    # ------------------------------------------------------------------ exchange helpers
+
     def _capture_replies_to_square(self, board: chess.Board, target_square: int) -> list[chess.Move]:
-        replies: list[chess.Move] = []
-        for reply in board.legal_moves:
-            if reply.to_square != target_square or not board.is_capture(reply):
-                continue
-            replies.append(reply)
-        return replies
+        return list(board.generate_legal_captures(chess.BB_ALL, chess.BB_SQUARES[target_square]))
 
     def _best_recapture_delta(
         self,
@@ -91,9 +177,7 @@ class MCTS:
         target_square: int,
     ) -> int:
         best_delta = int(self._material_balance(board, mover) - before_material)
-        for reply in board.legal_moves:
-            if reply.to_square != target_square or not board.is_capture(reply):
-                continue
+        for reply in self._capture_replies_to_square(board, target_square):
             board.push(reply)
             try:
                 delta = int(self._material_balance(board, mover) - before_material)
@@ -131,7 +215,146 @@ class MCTS:
                 board.pop()
         return worst_delta
 
+    # ------------------------------------------------------------------ tree reuse
 
+    def reset_tree(self) -> None:
+        self._root = None
+        self._root_stack = None
+        self._root_board = None
+
+    def _find_reusable_root(self, board: chess.Board) -> tuple[Node | None, bool]:
+        """Return ``(node, by_position)`` for the retained node matching ``board``.
+
+        With move history the tree is followed along the played moves. A board
+        without history (the web API sends FEN only) is looked up by position
+        among the retained root's first two plies; ``by_position`` is then True
+        because the node's cached, history-dependent data must be rebuilt.
+        """
+        if not self.reuse_tree or self._training_mode:
+            # Self-play targets are the visits of this search under fresh root noise;
+            # retained visits were gathered without it.
+            return None, False
+        if self._root is None or self._root_stack is None or self._root_board is None:
+            return None, False
+        target_fen = board.fen()
+        new_stack = tuple(board.move_stack)
+        old_stack = self._root_stack
+        if len(new_stack) >= len(old_stack) and new_stack[: len(old_stack)] == old_stack:
+            node: Node | None = self._root
+            probe = self._root_board.copy(stack=False)
+            for move in new_stack[len(old_stack):]:
+                node = node.children.get(move)
+                if node is None:
+                    break
+                probe.push(move)
+            if node is not None and probe.fen() == target_fen:
+                return node, False
+        if new_stack:
+            return None, False
+        return self._find_node_by_position(target_fen), True
+
+    def _find_node_by_position(self, target_fen: str) -> Node | None:
+        """Breadth-first lookup of ``target_fen`` in the retained tree (expanded nodes only)."""
+        if self._root_board.fen() == target_fen:
+            return self._root
+        frontier: list[tuple[Node, chess.Board]] = [(self._root, self._root_board.copy(stack=False))]
+        for _ in range(FEN_REUSE_MAX_DEPTH):
+            next_frontier: list[tuple[Node, chess.Board]] = []
+            for node, probe in frontier:
+                for move, child in node.children.items():
+                    if not child.expanded():
+                        continue
+                    probe.push(move)
+                    if probe.fen() == target_fen:
+                        return child
+                    next_frontier.append((child, probe.copy(stack=False)))
+                    probe.pop()
+            frontier = next_frontier
+        return None
+
+    def retained_visits(self, board: chess.Board) -> int:
+        """Root visits a search on ``board`` would start from (0 when nothing is reusable)."""
+        node, _ = self._find_reusable_root(board)
+        if node is None or not node.expanded():
+            return 0
+        return int(node.visit_count)
+
+    @staticmethod
+    def _sanitize_subtree(root: Node, *, reset_penalties: bool) -> None:
+        """Make a retained subtree safe to search from a new root.
+
+        No rollout can be in flight between searches, so virtual visits are
+        cleared (an interrupted batch would otherwise leave phantom losses).
+        Draws may depend on which repetitions lie inside the search path, which
+        changes with the root, so they are recomputed lazily; checkmates are
+        facts of the position and stay. Without game history the
+        history-dependent penalties are rebuilt as well.
+        """
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            node.virtual_visits = 0
+            if node.terminal_value != -1.0:
+                node.terminal_checked = False
+                node.terminal_value = None
+            if reset_penalties:
+                node.penalties_ready = False
+            stack.extend(node.children.values())
+
+    def _mark_terminal_children(
+        self,
+        node: Node,
+        board: chess.Board,
+        seen_positions: Mapping[PositionKey, int] | None,
+        path_positions: set[PositionKey] | None,
+    ) -> None:
+        """Record children whose position ends the game, before any of them is visited.
+
+        Terminal children need no network call, and knowing their exact value up
+        front lets selection use it instead of the first-play estimate: a mating
+        reply, a stalemate or a drawing repetition is seen as soon as its parent
+        is expanded rather than only if the search happens to try it (at 30-150
+        visits an opponent's single drawing or mating reply often never is).
+        Checks are tested for mate, positions with few opposing pieces for
+        stalemate, and reversible moves for repetition.
+        """
+        if not node.children:
+            return
+        twofold = self.twofold_draw and not self._training_mode
+        sparse = chess.popcount(board.occupied_co[not board.turn]) <= 3
+        halfmove_after = int(board.halfmove_clock) + 1
+        for move, child in node.children.items():
+            if child.terminal_checked:
+                continue
+            gives_check = board.gives_check(move)
+            may_repeat = (
+                seen_positions is not None and halfmove_after >= 4 and not board.is_irreversible(move)
+            )
+            if not (gives_check or sparse or may_repeat):
+                continue
+            board.push(move)
+            try:
+                if (gives_check or sparse) and not any(board.generate_legal_moves()):
+                    child.terminal_checked = True
+                    child.terminal_value = -1.0 if board.is_check() else 0.0
+                    continue
+                if may_repeat:
+                    key = position_key(board)
+                    in_path = twofold and path_positions is not None and key in path_positions
+                    if in_path or int(seen_positions.get(key, 0)) + 1 >= 3:
+                        child.terminal_checked = True
+                        child.terminal_value = 0.0
+            finally:
+                board.pop()
+
+    def _renoise_root(self, root: Node) -> None:
+        priors = {move: child.prior for move, child in root.children.items()}
+        if not priors:
+            return
+        for move, prior in self._apply_dirichlet_noise(priors).items():
+            root.children[move].prior = float(prior)
+
+    # ------------------------------------------------------------------ search
 
     def search(
         self,
@@ -139,15 +362,45 @@ class MCTS:
         add_noise: bool = False,
         num_simulations: int | None = None,
         temperature: float | None = None,
+        time_limit_sec: float | None = None,
     ) -> dict:
         if not isinstance(board, chess.Board):
             raise TypeError("Expected board to be chess.Board")
 
+        if time_limit_sec is not None and (not math.isfinite(time_limit_sec) or time_limit_sec <= 0):
+            raise ValueError("time_limit_sec must be finite and greater than zero")
+        deadline = None if time_limit_sec is None else time.monotonic() + time_limit_sec
         self._tactical_penalty_cache.clear()
+        self._position_tactical_cache.clear()
+        self._principle_penalty_cache.clear()
+        training_mode = bool(add_noise)
+        if training_mode != self._training_mode:
+            # Edge penalties and terminal rules differ between the modes.
+            self.reset_tree()
+            self._training_mode = training_mode
+
+        root_seen_positions = build_seen_positions(board)
+        if self._is_terminal_board(board, root_seen_positions):
+            self.reset_tree()
+            return {"best_move": None, "root_value": self._terminal_value(board, root_seen_positions), "visit_counts": {},
+                    "policy_target": {}, "adjusted_policy_target": {}, "root_repetition_counts": {},
+                    "root_diagnostics": [], "retained_visits": 0, "completed_simulations": 0}
+        try:
+            # A forced mate in one or a checking mate in two is proved exactly in a few
+            # milliseconds; PUCT at 30-150 visits often misses the second kind, whose
+            # first move is usually a low-prior sacrifice.
+            mate = find_mate_in_one(board, deadline) or find_forcing_mate_in_two(board, deadline)
+        except TacticalSearchExpired:
+            mate = None
+        if mate is not None:
+            self.reset_tree()
+            return {"best_move": mate, "root_value": 1.0, "visit_counts": {mate: 1},
+                    "policy_target": {mate: 1.0}, "adjusted_policy_target": {mate: 1.0},
+                    "root_repetition_counts": {}, "root_diagnostics": [], "retained_visits": 0,
+                    "completed_simulations": 0}
         sims = max(1, int(num_simulations if num_simulations is not None else self.cfg.mcts.num_simulations))
         temperature = float(self.cfg.mcts.temperature if temperature is None else temperature)
         batch_limit = max(1, int(self.cfg.mcts.inference_batch_size))
-        root_seen_positions = build_seen_positions(board)
 
         self.logger.debug(
             "mcts start fen=%s sims=%s temperature=%.3f add_noise=%s",
@@ -157,66 +410,173 @@ class MCTS:
             add_noise,
         )
 
-        root = Node(prior=0.0)
-        initial_root_value = self._expand_node(root, board, add_noise=add_noise)
+        root, by_position = self._find_reusable_root(board)
+        retained_visits = 0
+        if root is not None and root.expanded():
+            self._sanitize_subtree(root, reset_penalties=by_position)
+            root.parent = None
+            retained_visits = int(root.visit_count)
+            initial_root_value = float(root.value_estimate if root.value_estimate is not None else root.q)
+            if add_noise:
+                self._renoise_root(root)
+        else:
+            root = Node(prior=0.0)
+            initial_root_value = self._expand_node(root, board, add_noise=add_noise)
+        self._mark_terminal_children(root, board, root_seen_positions, set())
+        self._root = root
+        self._root_stack = tuple(board.move_stack)
+        self._root_board = board.copy(stack=False)
+
         pending_simulations = sims
+        completed = 0
+        collisions = 0
+        # Leave some of the move budget for the root tactical check.
+        search_deadline = None if deadline is None else deadline - min(0.25, time_limit_sec * 0.2)
         diagnostics = self._new_penalty_diagnostics() if self._penalty_diagnostics_enabled() else None
+        twofold = self.twofold_draw and not training_mode
+        loop_started = time.monotonic()
 
         while pending_simulations > 0:
-            rollout_batch = min(batch_limit, pending_simulations)
-            pending_simulations -= rollout_batch
-            pending_groups: dict[str, list[tuple[Node, list[Node], chess.Board]]] = {}
-
-            for _ in range(rollout_batch):
-                node = root
-                sim_board = board.copy(stack=True)
-                sim_seen_positions = dict(root_seen_positions)
-                search_path = [node]
-
-                while node.expanded() and not self._is_terminal_board(sim_board):
-                    move, next_node = self._select_child(node, sim_board, sim_seen_positions, diagnostics=diagnostics)
-                    if move is None or next_node is None:
+            if search_deadline is not None and time.monotonic() >= search_deadline:
+                break
+            if not training_mode and self._best_move_is_settled(
+                root, pending_simulations, completed, loop_started, search_deadline
+            ):
+                break
+            batch_target = min(self._batch_size(batch_limit, completed + retained_visits), pending_simulations)
+            pending_groups: dict[str, list[tuple[Node, list[Node], chess.Board, dict, set]]] = {}
+            reserved_paths: list[list[Node]] = []
+            terminal_backups: list[tuple[list[Node], float]] = []
+            queued = 0
+            finished = 0
+            attempts = 0
+            try:
+                while queued + finished < batch_target and attempts < 2 * batch_target:
+                    attempts += 1
+                    if search_deadline is not None and time.monotonic() >= search_deadline:
                         break
+                    node = root
+                    sim_board = board.copy(stack=True)
+                    sim_seen_positions = dict(root_seen_positions)
+                    path_positions: set[PositionKey] = set()
+                    repeated_in_path = False
+                    search_path = [node]
+                    depth = 0
 
-                    sim_board.push(move)
-                    key = position_key(sim_board)
-                    sim_seen_positions[key] = sim_seen_positions.get(key, 0) + 1
-
-                    node = next_node
-                    search_path.append(node)
-
-                if self._is_terminal_board(sim_board):
-                    self._backpropagate(search_path, self._terminal_value(sim_board))
-                    continue
-
-                self._reserve_virtual_path(search_path)
-                leaf_key = self._prediction_key(sim_board)
-                pending_groups.setdefault(leaf_key, []).append((node, search_path, sim_board))
-
-            if pending_groups:
-                grouped_boards = [entries[0][2] for entries in pending_groups.values()]
-                policy_logits_batch, values_batch = predict_boards(
-                    self.model,
-                    grouped_boards,
-                    cfg=self.cfg,
-                    device=self.device,
-                )
-                for entries, policy_logits, nn_value in zip(pending_groups.values(), policy_logits_batch, values_batch):
-                    for node, search_path, sim_board in entries:
-                        self._release_virtual_path(search_path)
-                        leaf_value = self._expand_node_from_prediction(
-                            node=node,
-                            board=sim_board,
-                            policy_logits=policy_logits,
-                            nn_value=float(nn_value),
-                            add_noise=False,
+                    while True:
+                        terminal_value = self._node_terminal_value(
+                            node, sim_board, sim_seen_positions, repeated_in_path and twofold
                         )
-                        self._backpropagate(search_path, leaf_value)
+                        if terminal_value is not None:
+                            # Hold the path like a pending rollout until the batch ends.
+                            # Backing a terminal up at once while its siblings carry
+                            # virtual losses lets a drawn terminal (value 0) absorb the
+                            # rest of the batch; that stalemated a won K+Q v K.
+                            self._reserve_virtual_path(search_path)
+                            reserved_paths.append(search_path)
+                            terminal_backups.append((search_path, terminal_value))
+                            finished += 1
+                            break
+                        if not node.expanded():
+                            self._reserve_virtual_path(search_path)
+                            reserved_paths.append(search_path)
+                            if node.virtual_visits > 1:
+                                # Collision: this leaf is already queued in the batch. Queuing it
+                                # again would back up one network result twice. The reservation
+                                # stays until the batch ends, steering later rollouts elsewhere.
+                                collisions += 1
+                            else:
+                                leaf_key = self._prediction_key(sim_board)
+                                pending_groups.setdefault(leaf_key, []).append(
+                                    (node, search_path, sim_board, sim_seen_positions, path_positions)
+                                )
+                                queued += 1
+                            break
+
+                        move, next_node = self._select_child(
+                            node, sim_board, sim_seen_positions, diagnostics=diagnostics, depth=depth
+                        )
+                        if move is None or next_node is None:
+                            break
+                        sim_board.push(move)
+                        key = position_key(sim_board)
+                        repeated_in_path = key in path_positions
+                        path_positions.add(key)
+                        sim_seen_positions[key] = sim_seen_positions.get(key, 0) + 1
+                        node = next_node
+                        search_path.append(node)
+                        depth += 1
+
+                if pending_groups:
+                    grouped_boards = [entries[0][2] for entries in pending_groups.values()]
+                    policy_logits_batch, values_batch = predict_boards(
+                        self.model,
+                        grouped_boards,
+                        cfg=self.cfg,
+                        device=self.device,
+                    )
+                    for entries, policy_logits, nn_value in zip(pending_groups.values(), policy_logits_batch, values_batch):
+                        for node, search_path, sim_board, leaf_seen, leaf_path in entries:
+                            leaf_value = self._expand_node_from_prediction(
+                                node=node,
+                                board=sim_board,
+                                policy_logits=policy_logits,
+                                nn_value=float(nn_value),
+                                add_noise=False,
+                            )
+                            self._mark_terminal_children(node, sim_board, leaf_seen, leaf_path)
+                            self._backpropagate(search_path, leaf_value)
+                for search_path, terminal_value in terminal_backups:
+                    self._backpropagate(search_path, terminal_value)
+            finally:
+                # Always release, also when inference raises: a leaked virtual visit
+                # would act as a permanent loss on that path in the retained tree.
+                for path in reserved_paths:
+                    self._release_virtual_path(path)
+            done = queued + finished
+            completed += done
+            pending_simulations -= done
+            if done == 0:
+                break
 
         visit_counts = {move: child.visit_count for move, child in root.children.items()}
         raw_policy_target = self._visit_policy(root, temperature=temperature)
-        adjusted_policy_target, root_repetition_counts = self._adjust_root_policy(board, raw_policy_target, root_seen_positions)
-        best_move = self._select_root_move(board, root, adjusted_policy_target or raw_policy_target, root_seen_positions)
+        if not any(visit_counts.values()):
+            raw_policy_target = {move: child.prior for move, child in root.children.items()}
+        root_value = float(root.q) if root.visit_count > 0 else float(initial_root_value)
+        if training_mode:
+            adjusted_policy_target, root_repetition_counts = self._adjust_root_policy(
+                board, raw_policy_target, root_seen_positions, root_value=root_value, training_mode=True
+            )
+            best_move = self._select_root_move(board, root, adjusted_policy_target or raw_policy_target, root_seen_positions)
+            ranked_moves = sorted(root.children, key=lambda move: (
+                move == best_move, float(adjusted_policy_target.get(move, 0.0)),
+                root.children[move].visit_count, -root.children[move].q,
+            ), reverse=True)
+        else:
+            # Play: the move is the search's own verdict. Penalties and repetition
+            # have already shaped the visits inside the tree; nothing is counted twice.
+            adjusted_policy_target, root_repetition_counts = dict(raw_policy_target), {}
+            ranked_moves = self._rank_root_moves(root)
+        if training_mode:
+            best_move, rejected = select_safe_move(board, ranked_moves, deadline)
+        else:
+            best_move, rejected = select_safe_move(
+                board,
+                ranked_moves,
+                deadline,
+                root_value=root_value,
+                move_values={
+                    move: (child.visit_count, -child.q)
+                    for move, child in root.children.items()
+                    if child.visit_count
+                },
+            )
+        if rejected:
+            adjusted_policy_target = {move: prob for move, prob in adjusted_policy_target.items() if move not in rejected}
+            total = sum(adjusted_policy_target.values())
+            adjusted_policy_target = ({move: prob / total for move, prob in adjusted_policy_target.items()}
+                                      if total > 1e-12 else {best_move: 1.0})
         root_diagnostics = self._root_move_diagnostics(
             board,
             root,
@@ -224,11 +584,12 @@ class MCTS:
             adjusted_policy_target,
             root_seen_positions,
         )
-        root_value = float(root.q) if root.visit_count > 0 else float(initial_root_value)
 
         self.logger.debug(
-            "mcts done sims=%s expanded_children=%s root_visits=%s best_move=%s root_value=%.4f",
+            "mcts done sims=%s completed=%s retained=%s expanded_children=%s root_visits=%s best_move=%s root_value=%.4f",
             sims,
+            completed,
+            retained_visits,
             len(root.children),
             root.visit_count,
             best_move.uci() if best_move else None,
@@ -242,10 +603,96 @@ class MCTS:
             "root_repetition_counts": root_repetition_counts,
             "root_diagnostics": root_diagnostics,
             "root_value": root_value,
+            "retained_visits": retained_visits,
+            "completed_simulations": completed,
+            "collisions": collisions,
         }
         if diagnostics is not None:
             result["penalty_diagnostics"] = self._finalize_penalty_diagnostics(diagnostics)
         return result
+
+    def _batch_size(self, batch_limit: int, root_visits: int) -> int:
+        """Rollouts per inference batch.
+
+        With ``mcts.batch_growth`` the batch starts at 4 and grows with the visits
+        already in the tree (visits // 16, capped at ``inference_batch_size``). Early
+        rollouts then run nearly one after another, each informing the next choice,
+        which is where a wide batch hurts most (on a proven tactical suite batch 16
+        solved 20/27 at 64 and at 128 sims, batch 4 22-23/27). Later rollouts spread
+        over a wide tree, where large batches cost little and run faster per board.
+        """
+        if not self.batch_growth:
+            return batch_limit
+        return max(1, min(batch_limit, max(BATCH_GROWTH_MIN, int(root_visits) // BATCH_GROWTH_DIVISOR)))
+
+    @staticmethod
+    def _root_rank_key(child: Node) -> tuple[int, float, float]:
+        """Most visits first; ties go to the better value for the mover, then the prior."""
+        value_for_mover = -child.q if child.visit_count else -2.0
+        return (int(child.visit_count), float(value_for_mover), float(child.prior))
+
+    def _lower_confidence_bound(self, child: Node) -> float:
+        return -child.q - self.lcb_scale / math.sqrt(max(1, child.visit_count))
+
+    def _rank_root_moves(self, root: Node) -> list[chess.Move]:
+        """Play-mode order of root moves.
+
+        Among moves holding a real share of the visits the best lower confidence
+        bound on the value comes first (KataGo-style): a well-visited move keeps
+        its place unless a rival's value is better by more than the noise its
+        smaller sample allows. At 30-150 visits the visit count alone can back a
+        move that absorbed a batch, such as a stalemate in a won ending.
+        """
+        children = root.children
+        by_visits = sorted(children, key=lambda move: self._root_rank_key(children[move]), reverse=True)
+        if not by_visits or self.lcb_scale <= 0.0:
+            return by_visits
+        top_visits = children[by_visits[0]].visit_count
+        floor = max(2, math.ceil(LCB_MIN_VISIT_FRACTION * top_visits))
+        eligible = [move for move in by_visits if children[move].visit_count >= floor]
+        if len(eligible) < 2:
+            return by_visits
+        eligible.sort(
+            key=lambda move: (self._lower_confidence_bound(children[move]), children[move].visit_count),
+            reverse=True,
+        )
+        chosen = set(eligible)
+        return eligible + [move for move in by_visits if move not in chosen]
+
+    def _best_move_is_settled(
+        self,
+        root: Node,
+        pending_simulations: int,
+        completed: int,
+        started: float,
+        search_deadline: float | None,
+    ) -> bool:
+        """True when the remaining budget can no longer change the most-visited move.
+
+        The runner-up would need more visits than the budget still allows, so
+        stopping returns the same move while saving the time for later moves.
+        """
+        if not self.smart_pruning or completed < SMART_PRUNING_MIN_VISITS:
+            return False
+        remaining = float(pending_simulations)
+        if search_deadline is not None:
+            now = time.monotonic()
+            elapsed = now - started
+            if elapsed > 0.0:
+                remaining = min(remaining, completed / elapsed * max(0.0, search_deadline - now))
+        top = second = 0
+        top_move = None
+        for move, child in root.children.items():
+            visits = child.visit_count
+            if visits > top:
+                top, second, top_move = visits, top, move
+            elif visits > second:
+                second = visits
+        if top - second <= remaining:
+            return False
+        # The final choice also weighs values; keep searching while it disagrees with visits.
+        ranked = self._rank_root_moves(root)
+        return bool(ranked) and ranked[0] == top_move
 
     def _prediction_key(self, board: chess.Board) -> str:
         return board.fen(en_passant="fen")
@@ -257,6 +704,8 @@ class MCTS:
     def _release_virtual_path(self, search_path: list[Node]) -> None:
         for node in search_path:
             node.remove_virtual_visit(1)
+
+    # ------------------------------------------------------------------ expansion / evaluation
 
     def _expand_node(self, node: Node, board: chess.Board, add_noise: bool) -> float:
         policy_logits_batch, value_batch = predict_boards(self.model, [board], cfg=self.cfg, device=self.device)
@@ -276,16 +725,25 @@ class MCTS:
         for move, prior in priors.items():
             if move not in node.children:
                 node.children[move] = Node(prior=prior, parent=node)
-        return self._blend_value(board, nn_value)
+        value = self._blend_value(board, nn_value)
+        node.value_estimate = float(value)
+        return value
 
     def _blend_value(self, board: chess.Board, nn_value: float) -> float:
+        if self.mopup:
+            graded = bare_king_value(board)
+            if graded is not None:
+                return float(np.clip(graded * max(0.0, 1.0 - 2.0 * self._progress_penalty(board)), -1.0, 1.0))
         classical_alpha = min(max(float(self.cfg.mcts.classical_value_alpha), 0.0), 1.0)
         classical_eval = float(evaluate_board(board))
         if board.turn == chess.BLACK:
             classical_eval *= -1.0
         classical_value = float(np.tanh(classical_eval / 600.0))
         blended = classical_alpha * classical_value + (1.0 - classical_alpha) * float(nn_value)
-        blended -= self._progress_penalty(board)
+        # A stagnant halfmove clock drifts toward the fifty-move draw: shrink the
+        # value toward 0 for both sides rather than charging the side to move at
+        # the leaf (which would alternate sign with search depth).
+        blended *= max(0.0, 1.0 - 2.0 * self._progress_penalty(board))
         return float(np.clip(blended, -1.0, 1.0))
 
     def _progress_penalty(self, board: chess.Board) -> float:
@@ -329,6 +787,8 @@ class MCTS:
             return {move: uniform for move in legal_moves}
         probs = probs / total
         return {move: float(prob) for move, prob in zip(legal_moves, probs)}
+
+    # ------------------------------------------------------------------ diagnostics
 
     def _penalty_diagnostics_enabled(self) -> bool:
         return bool(getattr(getattr(self.cfg, "penalty_diagnostics", None), "enabled", False))
@@ -385,15 +845,58 @@ class MCTS:
             "ranking_comparisons": int(diagnostics["ranking"]["comparisons"]),
         }
 
+    # ------------------------------------------------------------------ selection
+
+    def _ensure_child_penalties(
+        self,
+        node: Node,
+        board: chess.Board,
+        seen_positions: Mapping[PositionKey, int] | None,
+        depth: int = 0,
+    ) -> None:
+        """Compute every child's static edge penalty once and cache it on the child.
+
+        Deeper nodes get a cheaper penalty set; when tree reuse later surfaces a node
+        to a shallower depth, its children are recomputed at the richer tier.
+        """
+        include_principles = self.principle_max_depth < 0 or int(depth) <= self.principle_max_depth
+        # The opponent-reply mate/fork scan is the one expensive principle; the root
+        # safety screen already covers short mates for the move actually played.
+        include_tactics = int(depth) == 0
+        tier = 0 if include_tactics else (1 if include_principles else 2)
+        if node.penalties_ready and node.penalty_tier <= tier:
+            return
+        # Play mode handles repetition as a draw value and stagnation in the leaf
+        # value, so those edge components exist only for self-play. With penalties
+        # off nothing below the root needs computing (the root keeps diagnostics).
+        legacy = self._training_mode
+        skip = not legacy and self.penalty_mode == "off" and depth > 0
+        for move, child in node.children.items():
+            if skip:
+                components = {}
+            else:
+                components = self._move_penalty_components(
+                    board, move, seen_positions,
+                    include_principles=include_principles, include_tactics=include_tactics,
+                    include_repetition=legacy, include_progress=legacy,
+                )
+            child.penalty_components = components
+            child.penalty = float(sum(components.values()))
+        node.penalties_ready = True
+        node.penalty_tier = tier
+
     def _select_child(
         self,
         node: Node,
         board: chess.Board,
         seen_positions: Mapping[PositionKey, int] | None = None,
         diagnostics: dict | None = None,
+        depth: int = 0,
     ):
         if not node.children:
             return None, None
+
+        self._ensure_child_penalties(node, board, seen_positions, depth)
 
         best_score = -float("inf")
         best_raw_score = -float("inf")
@@ -401,18 +904,46 @@ class MCTS:
         best_raw_move = None
         best_child = None
         parent_visits = max(1, node.total_visit_count)
+        exploration = self.c_puct * math.sqrt(parent_visits)
+        # First-play urgency: an unvisited child inherits the parent's estimate
+        # minus a reduction instead of a neutral 0, so a losing parent does not
+        # spray visits over every untried move.
+        parent_value = float(node.q) if node.visit_count > 0 else float(node.value_estimate or 0.0)
+        fpu_value = parent_value - self.fpu_reduction
+        virtual_loss = self.virtual_loss
+        mode = "offset" if self._training_mode else self.penalty_mode
 
         for move, child in node.children.items():
-            q_value = -child.q
-            u_value = self.c_puct * child.prior * math.sqrt(parent_visits) / (1 + child.total_visit_count)
-            virtual_penalty = self.virtual_loss * float(child.virtual_visits)
-            raw_score = q_value + u_value - virtual_penalty
-            if diagnostics is None:
-                move_penalty = self._move_penalty(board, move, seen_positions)
+            visits = child.visit_count
+            virtual = child.virtual_visits
+            if visits:
+                q_value = -child.value_sum / visits
+                weight = visits
+            elif child.terminal_value is not None:
+                # Known terminal (mate, stalemate, repetition): its value is exact.
+                q_value = -child.terminal_value
+                weight = 1
             else:
-                components = self._move_penalty_components(board, move, seen_positions)
-                self._record_penalty_diagnostics(diagnostics, components)
-                move_penalty = float(sum(components.values()))
+                q_value = fpu_value
+                weight = 1
+            if virtual:
+                # Each pending rollout is assumed to come back `virtual_loss` worse than
+                # the current estimate. The effect is relative, so it spreads a batch
+                # the same way whether the side to move is winning or losing, and it
+                # fades as real visits accumulate.
+                q_value -= virtual_loss * virtual / (weight + virtual)
+            u_value = exploration * child.prior / (1 + visits + virtual)
+            raw_score = q_value + u_value
+            if mode == "offset":
+                move_penalty = child.penalty
+            elif mode == "progressive":
+                # Progressive bias: full weight before the first visit, then fading
+                # like the exploration term so the child's own value can overrule it.
+                move_penalty = child.penalty / (1 + visits)
+            else:
+                move_penalty = 0.0
+            if diagnostics is not None:
+                self._record_penalty_diagnostics(diagnostics, child.penalty_components or {})
             score = raw_score - move_penalty
             if raw_score > best_raw_score:
                 best_raw_score = raw_score
@@ -429,50 +960,88 @@ class MCTS:
 
         return best_move, best_child
 
+    # ------------------------------------------------------------------ move penalties
+
     def _move_penalty(self, board: chess.Board, move: chess.Move, seen_positions: Mapping[PositionKey, int] | None = None) -> float:
         return float(sum(self._move_penalty_components(board, move, seen_positions).values()))
 
-    def _move_penalty_components(self, board: chess.Board, move: chess.Move, seen_positions: Mapping[PositionKey, int] | None = None) -> dict[str, float]:
+    def _move_penalty_components(
+        self,
+        board: chess.Board,
+        move: chess.Move,
+        seen_positions: Mapping[PositionKey, int] | None = None,
+        *,
+        include_principles: bool = True,
+        include_tactics: bool = True,
+        include_repetition: bool = True,
+        include_progress: bool = True,
+    ) -> dict[str, float]:
         oscillation_penalty = self._oscillation_penalty(board, move)
         before_halfmove = int(getattr(board, "halfmove_clock", 0))
         was_capture = bool(board.is_capture(move))
-        moving_piece = board.piece_at(move.from_square)
         mover = board.turn
         before_material = self._material_balance(board, mover)
         before_position_key = position_key(board)
-        before_board = board.copy(stack=True)
 
-        board.push(move)
-        try:
+        # Evaluate on a stackless copy: the original board (with history) stays the
+        # untouched "before" position for the principle heuristics.
+        after = board.copy(stack=False)
+        after.push(move)
+
+        tactical_key = (before_position_key, move.uci())
+        tactical_penalty = self._position_tactical_cache.get(tactical_key)
+        if tactical_penalty is None:
             tactical_penalty = 0.0
-            moved_piece = board.piece_at(move.to_square)
-            if moved_piece is not None and moved_piece.color == mover:
-                tactical_penalty = self._piece_tactical_penalty_after_push(
-                    board,
-                    mover=mover,
-                    piece_type=moved_piece.piece_type,
-                    before_material=before_material,
-                    target_square=move.to_square,
-                    before_position_key=before_position_key,
-                    move_uci=move.uci(),
-                )
+            # A quiet move can abandon another piece (e.g. Rae1 leaving Qh3
+            # to ...Bxh3). Inspect every legally capturable friendly piece.
+            targets = {}
+            for reply in after.generate_legal_captures():
+                if after.is_en_passant(reply):
+                    targets[reply.to_square] = chess.PAWN
+                else:
+                    piece = after.piece_at(reply.to_square)
+                    if piece is not None and piece.color == mover:
+                        targets[reply.to_square] = piece.piece_type
+            for target, piece_type in targets.items():
+                tactical_penalty = max(tactical_penalty, self._piece_tactical_penalty_after_push(
+                    after, mover=mover, piece_type=piece_type,
+                    before_material=before_material, target_square=target,
+                    before_position_key=before_position_key, move_uci=move.uci(),
+                ))
+            self._position_tactical_cache[tactical_key] = tactical_penalty
 
-            principle_components = principle_penalty_components(
-                before=before_board,
-                after=board,
-                move=move,
-                cfg=self.cfg.principle_penalties,
-            ).components
+        principle_components: dict[str, float] = {}
+        if include_principles:
+            principle_key = (
+                before_position_key,
+                int(board.halfmove_clock),
+                int(board.fullmove_number),
+                tuple(board.move_stack),
+                move,
+                bool(include_tactics),
+            )
+            cached = self._principle_penalty_cache.get(principle_key)
+            if cached is None:
+                cached = principle_penalty_components(
+                    before=board,
+                    after=after,
+                    move=move,
+                    cfg=self.cfg.principle_penalties,
+                    include_tactics=include_tactics,
+                ).components
+                self._principle_penalty_cache[principle_key] = cached
+            principle_components = cached
 
-            return {
-                "oscillation": float(oscillation_penalty),
-                "repetition": float(self._repetition_penalty_in_position(board, seen_positions)),
-                "progress": float(self._forward_progress_penalty_after_push(board, before_halfmove, was_capture)),
-                "tactical": float(tactical_penalty),
-                **{f"principle.{name}": float(value) for name, value in principle_components.items()},
-            }
-        finally:
-            board.pop()
+        components = {
+            "oscillation": float(oscillation_penalty),
+            "tactical": float(tactical_penalty),
+            **{f"principle.{name}": float(value) for name, value in principle_components.items()},
+        }
+        if include_repetition:
+            components["repetition"] = float(self._repetition_penalty_in_position(after, seen_positions))
+        if include_progress:
+            components["progress"] = float(self._forward_progress_penalty_after_push(after, before_halfmove, was_capture))
+        return components
 
     def _piece_tactical_penalty(self, board: chess.Board, move: chess.Move) -> float:
         moving_piece = board.piece_at(move.from_square)
@@ -536,7 +1105,7 @@ class MCTS:
         if cfg is None or board.is_checkmate():
             return 0.0
 
-        cache_key = (before_position_key, move_uci)
+        cache_key = (before_position_key, move_uci, target_square)
         cached = self._tactical_penalty_cache.get(cache_key)
         if cached is not None:
             return float(cached)
@@ -547,26 +1116,21 @@ class MCTS:
             before_material=before_material,
             target_square=target_square,
         )
-        if worst_exchange_delta is None:
+        if worst_exchange_delta is None or worst_exchange_delta > -EVEN_TRADE_TOLERANCE_CP:
             penalty = 0.0
         else:
-            threshold = float(cfg["sac_compensation_threshold"])
-            if worst_exchange_delta >= threshold:
-                penalty = 0.0
-            else:
-                piece_value = float(PIECE_VALUES.get(piece_type, 0))
-                net_loss = float(-worst_exchange_delta)
-                if net_loss >= max(piece_value * 0.75, 100.0):
-                    penalty = float(cfg["blunder_penalty"])
-                else:
-                    penalty = float(cfg["hanging_penalty"])
-
-                if penalty > 0.0 and board.is_check():
-                    penalty *= float(cfg.get("check_discount", 1.0))
+            # Proportional to the material actually lost on the square, capped at the whole
+            # piece: trading a queen for rook and knight (-70 cp) used to cost as much as
+            # dropping 600 cp, because any loss below 75% of the piece got the flat
+            # "hanging" rate.
+            piece_value = float(PIECE_VALUES.get(piece_type, 0))
+            net_loss = float(-worst_exchange_delta)
+            penalty = float(cfg["blunder_penalty"]) * min(1.0, net_loss / piece_value)
+            if penalty > 0.0 and board.is_check():
+                penalty *= float(cfg.get("check_discount", 1.0))
 
         self._tactical_penalty_cache[cache_key] = float(penalty)
         return float(penalty)
-
 
     def _repetition_penalty_in_position(self, board: chess.Board, seen_positions: Mapping[PositionKey, int] | None = None) -> float:
         repetition_penalty = max(0.0, float(self.cfg.selfplay.repetition_penalty))
@@ -588,11 +1152,15 @@ class MCTS:
         return float(penalty)
 
     def _oscillation_penalty(self, board: chess.Board, move: chess.Move) -> float:
-        if not board.move_stack:
+        # The last ply is the opponent's; the mover's own previous move is two plies back.
+        if len(board.move_stack) < 2:
             return 0.0
-        last_move = board.move_stack[-1]
-        if move.from_square == last_move.to_square and move.to_square == last_move.from_square:
-            return max(0.0, float(self.cfg.selfplay.repetition_penalty)) * 0.75
+        previous = board.move_stack[-2]
+        if move.from_square == previous.to_square and move.to_square == previous.from_square:
+            # Returning with a capture or a check is purposeful, not shuffling.
+            if board.is_capture(move) or board.gives_check(move):
+                return 0.0
+            return max(0.0, float(self.cfg.selfplay.repetition_penalty)) * 0.25
         return 0.0
 
     def _forward_progress_penalty_after_push(self, board: chess.Board, before_halfmove: int, was_capture: bool) -> float:
@@ -602,7 +1170,17 @@ class MCTS:
             penalty += 0.02
         return float(penalty)
 
-    def _adjust_root_policy(self, board: chess.Board, policy_target: dict[chess.Move, float], seen_positions: Mapping[PositionKey, int]) -> tuple[dict[chess.Move, float], dict[str, int]]:
+    # ------------------------------------------------------------------ root policy / move choice
+
+    def _adjust_root_policy(
+        self,
+        board: chess.Board,
+        policy_target: dict[chess.Move, float],
+        seen_positions: Mapping[PositionKey, int],
+        *,
+        root_value: float = 0.0,
+        training_mode: bool = False,
+    ) -> tuple[dict[chess.Move, float], dict[str, int]]:
         adjusted_policy, repetition_counts = filter_repetition_moves(
             policy_target,
             board,
@@ -612,15 +1190,30 @@ class MCTS:
         )
         if not adjusted_policy:
             return adjusted_policy, repetition_counts
+        # In play, a mover who is worse should be allowed to hold a draw by
+        # repetition; keep the anti-repetition filter unconditional only for
+        # self-play (noisy) searches, where game diversity is the goal.
+        if not training_mode and float(root_value) < REPETITION_FILTER_MIN_ROOT_VALUE:
+            adjusted_policy = dict(policy_target)
 
+        if self._root is not None:
+            self._ensure_child_penalties(self._root, board, seen_positions, 0)
         reweighted: dict[chess.Move, float] = {}
         for move, prob in adjusted_policy.items():
-            reweighted[move] = max(0.0, float(prob) - self._move_penalty(board, move, seen_positions) * 0.05)
+            reweighted[move] = max(0.0, float(prob) - self._root_edge_penalty(board, move, seen_positions) * 0.05)
 
         total = float(sum(reweighted.values()))
         if total <= 1e-12:
             return adjusted_policy, repetition_counts
         return ({move: value / total for move, value in reweighted.items()}, repetition_counts)
+
+    def _root_edge_penalty(self, board: chess.Board, move: chess.Move, seen_positions: Mapping[PositionKey, int] | None) -> float:
+        root = self._root
+        if root is not None and root.penalties_ready:
+            child = root.children.get(move)
+            if child is not None:
+                return float(child.penalty)
+        return self._move_penalty(board, move, seen_positions)
 
     def _select_root_move(self, board: chess.Board, root: Node, policy_target: dict[chess.Move, float], seen_positions: Mapping[PositionKey, int] | None = None) -> chess.Move | None:
         if not policy_target:
@@ -631,7 +1224,7 @@ class MCTS:
             key=lambda item: (
                 float(item[1]),
                 float(root.children[item[0]].visit_count if item[0] in root.children else 0),
-                float(root.children[item[0]].q if item[0] in root.children else -1e9),
+                float(-root.children[item[0]].q if item[0] in root.children else -1e9),
             ),
             reverse=True,
         )
@@ -659,10 +1252,11 @@ class MCTS:
     ) -> list[dict]:
         parent_visits = max(1, root.total_visit_count)
         diagnostics: list[dict] = []
+        self._ensure_child_penalties(root, board, seen_positions, 0)
 
         for move, child in root.children.items():
-            components = self._move_penalty_components(board, move, seen_positions)
-            penalty = float(sum(components.values()))
+            components = child.penalty_components or {}
+            penalty = float(child.penalty)
             q_value = float(-child.q)
             u_value = float(self.c_puct * child.prior * math.sqrt(parent_visits) / (1 + child.total_visit_count))
             raw_score = float(q_value + u_value)
@@ -697,6 +1291,8 @@ class MCTS:
         )
         return diagnostics[: max(1, int(limit))]
 
+    # ------------------------------------------------------------------ backup / terminal
+
     def _backpropagate(self, search_path: list[Node], value: float) -> None:
         current_value = float(value)
         for node in reversed(search_path):
@@ -704,14 +1300,58 @@ class MCTS:
             node.value_sum += current_value
             current_value = -current_value
 
-    def _is_terminal_board(self, board: chess.Board) -> bool:
-        return bool(board.is_game_over(claim_draw=True))
+    def _node_terminal_value(
+        self,
+        node: Node,
+        board: chess.Board,
+        seen_positions: Mapping[PositionKey, int],
+        repeated_in_path: bool = False,
+    ) -> float | None:
+        if not node.terminal_checked:
+            node.terminal_value = self._terminal_state(board, seen_positions, repeated_in_path=repeated_in_path)
+            node.terminal_checked = True
+        return node.terminal_value
 
-    def _terminal_value(self, board: chess.Board) -> float:
-        outcome = board.outcome(claim_draw=True)
-        if outcome is None or outcome.winner is None:
+    def _terminal_state(
+        self,
+        board: chess.Board,
+        seen_positions: Mapping[PositionKey, int] | None = None,
+        *,
+        repeated_in_path: bool = False,
+    ) -> float | None:
+        """Terminal value for the side to move, or None.
+
+        Game rules (mate, stalemate, insufficient material, fifty moves, a third
+        occurrence) use the incremental repetition map instead of replaying the
+        move stack at every node. ``repeated_in_path`` marks a position that
+        already occurred inside the current search path (strictly below the
+        root); like Stockfish the search scores it as a draw, because the side
+        that repeated can keep repeating. That makes repetition a value the
+        search can weigh (welcome when losing, avoided when winning) instead of
+        a fixed penalty.
+        """
+        if repeated_in_path:
             return 0.0
-        return 1.0 if outcome.winner == board.turn else -1.0
+        if not any(board.generate_legal_moves()):
+            return -1.0 if board.is_check() else 0.0
+        if board.is_insufficient_material():
+            return 0.0
+        if int(board.halfmove_clock) >= 100:
+            return 0.0
+        if seen_positions is not None:
+            repeat_count = int(seen_positions.get(position_key(board), 0))
+        else:
+            repeat_count = current_repetition_count(board)
+        if repeat_count >= 3:
+            return 0.0
+        return None
+
+    def _is_terminal_board(self, board: chess.Board, seen_positions: Mapping[PositionKey, int] | None = None) -> bool:
+        return self._terminal_state(board, seen_positions) is not None
+
+    def _terminal_value(self, board: chess.Board, seen_positions: Mapping[PositionKey, int] | None = None) -> float:
+        value = self._terminal_state(board, seen_positions)
+        return 0.0 if value is None else float(value)
 
     def _visit_policy(self, root: Node, temperature: float = 1.0) -> dict[chess.Move, float]:
         visit_counts = {move: int(child.visit_count) for move, child in root.children.items()}

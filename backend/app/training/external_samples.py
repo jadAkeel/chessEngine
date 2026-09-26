@@ -37,6 +37,22 @@ def _sample_hash(state: np.ndarray, move_index: int, value: float) -> bytes:
     return digest.digest()
 
 
+def is_validation_position(state: np.ndarray, cfg: AppConfig) -> bool:
+    """Stable position groups, independent of labels, clocks and file order.
+
+    Mirror equivalents stay together because training can mirror a position.
+    Existing shards have no game IDs, so this is a position split, not a game split.
+    """
+    position = np.ascontiguousarray(state[:18], dtype=np.float16)
+    mirrored = np.flip(position, axis=2).copy()
+    mirrored[[13, 14, 15, 16]] = mirrored[[14, 13, 16, 15]]
+    canonical = min(position.tobytes(), mirrored.tobytes())
+    digest = hashlib.blake2b(digest_size=8, person=b'chess-split-v1')
+    digest.update(str(cfg.external.seed).encode('ascii'))
+    digest.update(canonical)
+    return int.from_bytes(digest.digest(), 'big') / 2**64 < cfg.external.validation_split
+
+
 # =========================================
 # POLICY BUILDER
 # =========================================
@@ -95,9 +111,17 @@ def load_external_samples_with_stats(
     cfg: AppConfig,
     *,
     max_samples: int = 0,
+    partition: str | None = None,
+    rng: random.Random | None = None,
+    seen_hashes: set[bytes] | None = None,
 ) -> ExternalSampleLoadResult:
 
     path = Path(path)
+    if partition not in {None, 'train', 'validation'}:
+        raise ValueError("partition must be train, validation, or None")
+    if partition is not None and not 0.0 < cfg.external.validation_split < 1.0:
+        raise ValueError("validation_split must be between zero and one for partitioned loading")
+    rng = rng or random
     print(f"\n[LOAD] file={path.name}")
 
     data = np.load(path, mmap_mode='r', allow_pickle=False)
@@ -137,7 +161,7 @@ def load_external_samples_with_stats(
     drop_zero_states = bool(getattr(external_cfg, 'drop_zero_states', True))
     shuffle_enabled = bool(getattr(external_cfg, 'shuffle', True))
 
-    seen_hashes: set[bytes] = set()
+    seen_hashes = seen_hashes if seen_hashes is not None else set()
 
     stats = {
         "accepted": 0,
@@ -146,19 +170,20 @@ def load_external_samples_with_stats(
         "bad_value": 0,
         "bad_state": 0,
         "skipped_fullmove": 0,
+        "other_partition": 0,
     }
 
     samples: list[tuple[np.ndarray, PackedPolicy, float]] = []
 
-    limit = total_raw if max_samples <= 0 else min(total_raw, max_samples)
+    limit = total_raw if max_samples <= 0 or partition is not None else min(total_raw, max_samples)
 
     # 🔥 Shuffle indices داخل الشارد
     if shuffle_enabled and 0 < limit < total_raw:
-        indices = random.sample(range(total_raw), limit)
+        indices = rng.sample(range(total_raw), limit)
     else:
         indices = list(range(limit))
         if shuffle_enabled:
-            random.shuffle(indices)
+            rng.shuffle(indices)
 
     for i, idx_i in enumerate(indices):
         idx = int(policy_indices[idx_i])
@@ -183,6 +208,10 @@ def load_external_samples_with_stats(
             stats["skipped_fullmove"] += 1
             continue
 
+        if partition is not None and is_validation_position(state, cfg) != (partition == 'validation'):
+            stats["other_partition"] += 1
+            continue
+
         # ===== DEDUP =====
         if dedup_enabled:
             h = _sample_hash(state, idx, value)
@@ -194,6 +223,8 @@ def load_external_samples_with_stats(
         policy = _build_policy(idx)
         samples.append((state, policy, value))
         stats["accepted"] += 1
+        if max_samples > 0 and len(samples) >= max_samples:
+            break
 
         if i % 20000 == 0 and i > 0:
             print(f"[PROGRESS] {i}/{limit} | accepted={stats['accepted']}")
@@ -232,15 +263,18 @@ def load_external_samples_sharded(
     cfg: AppConfig,
     *,
     max_samples: int = 0,
+    partition: str | None = None,
+    shuffle_seed: int | None = None,
 ) -> Iterator[tuple[np.ndarray, PackedPolicy, float]]:
 
     folder = Path(folder)
-    shard_files = sorted(folder.glob("*.npz"))
+    shard_files = [folder] if folder.is_file() else sorted(folder.glob("*.npz"))
+    rng = random.Random(cfg.external.seed if shuffle_seed is None else shuffle_seed)
 
     # 🔥 Shuffle الشاردات
     external_cfg = getattr(cfg, 'external', None)
     if bool(getattr(external_cfg, 'shuffle', True)):
-        random.shuffle(shard_files)
+        rng.shuffle(shard_files)
 
     if not shard_files:
         raise FileNotFoundError(f"No shards found in {folder}")
@@ -248,8 +282,17 @@ def load_external_samples_sharded(
     print(f"\n[SHARDS] total={len(shard_files)}")
 
     total_streamed = 0
+    seen_files: set[bytes] = set()
+    seen_samples: set[bytes] = set()
 
     for shard_id, shard_path in enumerate(shard_files):
+        if bool(getattr(external_cfg, 'dedup', True)):
+            with shard_path.open('rb') as handle:
+                digest = hashlib.file_digest(handle, 'sha256').digest()
+            if digest in seen_files:
+                print(f"[DUPLICATE SHARD] {shard_path.name}")
+                continue
+            seen_files.add(digest)
         print(f"\n[SHARD] ===== {shard_id+1}/{len(shard_files)} -> {shard_path.name} =====")
 
         remaining = int(max_samples - total_streamed) if max_samples else 0
@@ -257,6 +300,9 @@ def load_external_samples_sharded(
             shard_path,
             cfg,
             max_samples=remaining,
+            partition=partition,
+            rng=rng,
+            seen_hashes=seen_samples,
         )
 
         print(f"[SHARD DONE] accepted={result.stats['accepted']}")
@@ -264,7 +310,7 @@ def load_external_samples_sharded(
         # 🔥 Shuffle داخل الشارد
         samples = result.samples
         if bool(getattr(external_cfg, 'shuffle', True)):
-            random.shuffle(samples)
+            rng.shuffle(samples)
 
         for sample in samples:
             yield sample

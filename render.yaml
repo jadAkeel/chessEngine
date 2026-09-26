@@ -8,6 +8,12 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.8-flash
+      - key: GEMINI_THINKING_LEVEL
+        value: high
   - type: web
     name: chess-engine-frontend
     runtime: static
