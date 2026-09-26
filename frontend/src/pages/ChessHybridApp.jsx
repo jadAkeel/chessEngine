@@ -21,7 +21,7 @@ import {
   VolumeX,
   X,
 } from "lucide-react";
-import { playMoveSoundFor, setSoundEnabled } from "@/utils/sound";
+import { initSound, playMoveSoundFor, setSoundEnabled } from "@/utils/sound";
 
 const DEFAULT_API_BASE_URL = import.meta.env.PROD
   ? "https://chessengine-2.onrender.com"
@@ -318,6 +318,7 @@ export default function ChessHybridApp() {
   }, [soundOn]);
 
   useEffect(() => {
+    initSound();
     const code = new URLSearchParams(window.location.search).get("room");
     if (code) joinRoom(code);
     else void warmupEngineServer();
