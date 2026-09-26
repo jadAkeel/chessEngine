@@ -236,12 +236,11 @@ def test_prefers_code_dataset_over_a_kernel_outputs_stale_copy(tmp_path: Path):
     assert kernel.find_code_root(tmp_path / "input") == real
 
 
-def test_14h_run_session_1_starts_from_the_best_model():
-    """The user chose mrj v1 iter 6 (the checkpoint dataset's best) for the 14 h run."""
+def test_14h_run_session_2_continues_from_session_1():
+    """Session 2 of the 14 h run goes on from session 1's latest iteration."""
     kernel = _load_kernel_module()
     main_src = KERNEL_SCRIPT.read_text(encoding="utf-8").split("def main")[1]
-    assert kernel.START_FROM in ("best", "latest")
-    assert kernel.START_FROM == "best"
+    assert kernel.START_FROM == "latest"
     assert 'if START_FROM == "best"' in main_src
 
 

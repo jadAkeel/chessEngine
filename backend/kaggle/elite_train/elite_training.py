@@ -40,11 +40,13 @@ BATCH_SIZE = os.environ.get("TRAIN_BATCH_SIZE", "128")
 DEVICE = os.environ.get("TRAIN_DEVICE", "cuda")
 # fp16 AMP overflowed once trunk activations reached ~18k (v2 iter 10 and v3
 # went NaN), so v4 trains in fp32 with a lower learning rate.
-LR = os.environ.get("TRAIN_LR", "0.0002")
+LR = os.environ.get("TRAIN_LR", "0.0001")
 USE_AMP = os.environ.get("TRAIN_USE_AMP", "0") == "1"
 # "latest" continues from the checkpoint dataset's newest iteration; "best" starts
-# from its best model (session 1 of the 14 h run: mrj v1 iter 6, as the user chose).
-START_FROM = os.environ.get("TRAIN_START_FROM", "best")
+# from its best model. Session 1 of the 14 h run started from mrj v1 iter 6 (best);
+# session 2 continues from session 1's last iteration at half the learning rate,
+# since validation loss plateaued (+-0.03 noise) over session 1's last 5 iterations.
+START_FROM = os.environ.get("TRAIN_START_FROM", "latest")
 # "both" = zip in the kernel output + a new version of the checkpoint dataset
 # after every iteration. Old versions are kept so any iteration can be picked.
 AUTOSAVE = os.environ.get("TRAIN_AUTOSAVE", "both")
