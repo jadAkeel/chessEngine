@@ -22,6 +22,7 @@ from app.game.principles import principle_penalty_components
 from app.game.tactics import find_forcing_mate_in_two, find_mate_in_one, select_safe_move
 from app.mcts.search import MCTS
 from app.model.checkpoint import CheckpointLoadError, load_checkpoint, load_compatible_weights
+from app.model.inference import predict_boards
 from app.model.network import ChessNet
 from app.opponents.gemini import (
     DEFAULT_GEMINI_MODEL,
@@ -1066,6 +1067,11 @@ async def lifespan(app: FastAPI):
     try:
         MODEL, DEVICE = _load_model()
         logger.info(f"✅ MODEL READY on {DEVICE}")
+        if DEVICE == 'cpu':
+            # Pay the one-time TorchScript cost before /health lets the UI request a move.
+            warmup_start = time.perf_counter()
+            predict_boards(MODEL, [chess.Board()], device=DEVICE)
+            logger.info("CPU inference ready | warmup_ms=%s", _elapsed_ms(warmup_start))
     except Exception:
         if os.environ.get("GEMINI_API_KEY", "").strip():
             MODEL, DEVICE = None, None
@@ -1209,7 +1215,7 @@ def predict(req: PredictRequest):
 
 
 # Thinking time per UI depth on this CPU (the search also stops early once its move is settled).
-FASTMOVE_TIME_BY_DEPTH = {1: 0.3, 2: 0.5, 3: 0.8, 4: 1.2, 5: 1.6, 6: 2.0, 7: 2.6, 8: 3.2, 9: 4.0, 10: 5.0}
+FASTMOVE_TIME_BY_DEPTH = {1: 3.0, 2: 5.0, 3: 7.0, 4: 10.0, 5: 13.0, 6: 16.0, 7: 20.0, 8: 24.0, 9: 27.0, 10: 30.0}
 FASTMOVE_DEFAULT_MAX_SIMULATIONS = 400
 
 

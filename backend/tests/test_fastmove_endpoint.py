@@ -1,4 +1,5 @@
 """/fastmove as the web UI calls it: one time-bounded search, game history, tree reuse."""
+import asyncio
 import time
 from unittest.mock import patch
 
@@ -29,6 +30,21 @@ def _history(*ucis):
     for uci in ucis:
         board.push_uci(uci)
     return board
+
+
+def test_cpu_lifespan_warms_inference_before_accepting_requests(monkeypatch):
+    model = object()
+    warmed = []
+    monkeypatch.setattr(api, "_load_model", lambda: (model, "cpu"))
+    monkeypatch.setattr(api, "predict_boards", lambda loaded, boards, device: warmed.append((loaded, boards[0].fen(), device)))
+    monkeypatch.setattr(api, "MODEL", None)
+    monkeypatch.setattr(api, "DEVICE", None)
+
+    async def run_lifespan():
+        async with api.lifespan(api.app):
+            assert warmed == [(model, chess.STARTING_FEN, "cpu")]
+
+    asyncio.run(run_lifespan())
 
 
 def test_history_that_reproduces_the_fen_is_used():

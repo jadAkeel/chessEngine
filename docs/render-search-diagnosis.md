@@ -12,7 +12,11 @@ Each `/fastmove decision` line now includes `game`, `ply`, `fen`, `mode`, `reaso
 
 ## Recovery plan
 
+Live probes after adding diagnostics confirmed the budget problem: three previously unseen positions at the two-second default completed zero visits; root evaluation took about 2.8 seconds after warmup. The first inference after startup took about 43 seconds because it prepared the frozen model. A fresh position with a 16-second budget completed eight visits, and another with a 30-second budget completed 16 visits in about 26 seconds. These positions differ, so the counts show feasibility rather than a controlled playing-strength comparison.
+
+The first change is to warm CPU inference before the API reports ready and use a 30-second default for the web game's strongest level. Lower levels have shorter budgets. The API still accepts an explicit budget up to 30 seconds. This trades move latency for actual search on the free instance; it does not establish an Elo gain by itself.
+
 1. Collect several complete games with the new logs. Group decisions by `game` and compare positions where play weakened. Track the share of non-mate decisions with `root_visits=0` and the median and 95th percentile of `root_eval_ms` and `total_ms`.
-2. Benchmark representative opening, middlegame, and endgame positions on the deployed Render CPU. Measure model inference and search at different budgets and simulation caps. Choose a setting that reliably completes useful visits while keeping response latency acceptable. If the current model cannot do that on the free CPU, test a smaller or optimized checkpoint or move inference to stronger hardware.
+2. Benchmark representative opening, middlegame, and endgame positions on the deployed Render CPU. Measure model inference and search at different budgets and simulation caps. Tune the new budget using actual zero-visit rate and response latency. If the current model still cannot search enough on the free CPU, test a smaller or optimized checkpoint before changing hardware.
 3. Replay the reported games from PGN if available and compare candidate moves with a reference engine at fixed search limits. Separate mistakes from model policy, tactical screening, and missing MCTS visits. Do not start another training run solely because of the observed weakness.
 4. After selecting a search configuration, test it over a fixed position set and several full games. Compare zero-visit rate, move quality, latency, and outcomes against the current deployment before changing the live bot.
