@@ -58,17 +58,6 @@ def resolve_thread_plan(
     requested_interop = int(getattr(system_cfg, "interop_threads", 0) or 0)
     policy = str(getattr(system_cfg, "worker_thread_policy", "auto") or "auto").lower()
 
-    # Render Free has a fractional CPU quota; four intra-op workers compete for it.
-    try:
-        render_cpus = float(os.environ.get("RENDER_CPU_COUNT", "0"))
-    except ValueError:
-        render_cpus = 0.0
-    if (
-        role == "api" and device == "cpu" and os.environ.get("RENDER") == "true"
-        and 0 < render_cpus < 0.5 and "CPU_THREADS" not in os.environ
-    ):
-        requested_threads = 1
-
     if requested_threads > 0:
         intra_threads = requested_threads
     else:
