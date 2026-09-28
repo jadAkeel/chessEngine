@@ -275,7 +275,7 @@ export default function ChessHybridApp() {
   const [playerColor, setPlayerColor] = useState("w");
   const [nextColor, setNextColor] = useState("w");
   const [flipped, setFlipped] = useState(false);
-  const [depth, setDepth] = useState("10");
+  const [depth, setDepth] = useState("6");
   const [engineThinking, setEngineThinking] = useState(false);
   const [engineWarmupStatus, setEngineWarmupStatus] = useState("idle");
   const [warmupStartedAt, setWarmupStartedAt] = useState(0);

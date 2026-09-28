@@ -1215,7 +1215,7 @@ def predict(req: PredictRequest):
 
 
 # Thinking time per UI depth on this CPU (the search also stops early once its move is settled).
-FASTMOVE_TIME_BY_DEPTH = {1: 3.0, 2: 5.0, 3: 7.0, 4: 10.0, 5: 13.0, 6: 16.0, 7: 20.0, 8: 24.0, 9: 27.0, 10: 30.0}
+FASTMOVE_TIME_BY_DEPTH = {1: 3.0, 2: 5.0, 3: 7.0, 4: 10.0, 5: 16.0, 6: 30.0, 7: 30.0, 8: 30.0, 9: 30.0, 10: 30.0}
 FASTMOVE_DEFAULT_MAX_SIMULATIONS = 400
 
 
