@@ -369,7 +369,8 @@ class MCTS:
 
         if time_limit_sec is not None and (not math.isfinite(time_limit_sec) or time_limit_sec <= 0):
             raise ValueError("time_limit_sec must be finite and greater than zero")
-        deadline = None if time_limit_sec is None else time.monotonic() + time_limit_sec
+        started = time.monotonic()
+        deadline = None if time_limit_sec is None else started + time_limit_sec
         self._tactical_penalty_cache.clear()
         self._position_tactical_cache.clear()
         self._principle_penalty_cache.clear()
@@ -412,6 +413,7 @@ class MCTS:
 
         root, by_position = self._find_reusable_root(board)
         retained_visits = 0
+        root_eval_ms = 0.0
         if root is not None and root.expanded():
             self._sanitize_subtree(root, reset_penalties=by_position)
             root.parent = None
@@ -421,11 +423,14 @@ class MCTS:
                 self._renoise_root(root)
         else:
             root = Node(prior=0.0)
+            root_eval_started = time.monotonic()
             initial_root_value = self._expand_node(root, board, add_noise=add_noise)
+            root_eval_ms = (time.monotonic() - root_eval_started) * 1000.0
         self._mark_terminal_children(root, board, root_seen_positions, set())
         self._root = root
         self._root_stack = tuple(board.move_stack)
         self._root_board = board.copy(stack=False)
+        presearch_ms = (time.monotonic() - started) * 1000.0
 
         pending_simulations = sims
         completed = 0
@@ -605,6 +610,8 @@ class MCTS:
             "root_value": root_value,
             "retained_visits": retained_visits,
             "completed_simulations": completed,
+            "root_eval_ms": root_eval_ms,
+            "presearch_ms": presearch_ms,
             "collisions": collisions,
         }
         if diagnostics is not None:

@@ -1,5 +1,6 @@
 """/fastmove as the web UI calls it: one time-bounded search, game history, tree reuse."""
 import time
+from unittest.mock import patch
 
 import chess
 import pytest
@@ -75,6 +76,26 @@ def test_fastmove_respects_its_time_budget(tiny_engine):
     result = fastmove(FastMoveRequest(fen=chess.STARTING_FEN, time_budget_sec=0.3, max_simulations=1024))
     assert time.perf_counter() - started < 1.5
     assert result["adaptive"]["simulations"] < 1024
+
+
+def test_fastmove_logs_unsearched_decision_with_game_and_position(tiny_engine, monkeypatch):
+    monkeypatch.setattr(api, "_run_mcts", lambda *args, **kwargs: {
+        "best_move": chess.Move.from_uci("e2e4"),
+        "root_value": 0.2,
+        "visit_counts": {},
+        "completed_simulations": 0,
+        "retained_visits": 0,
+        "root_eval_ms": 2500.0,
+        "presearch_ms": 2600.0,
+    })
+    with patch.object(api.logger, "warning") as warning:
+        result = fastmove(FastMoveRequest(fen=chess.STARTING_FEN, game_id="game-123", time_budget_sec=2))
+    log = warning.call_args.args[0] % warning.call_args.args[1:]
+    assert result["source"] == "mcts"
+    assert "game=game-123" in log
+    assert f"fen={chess.STARTING_FEN}" in log
+    assert "mode=policy_fallback reason=deadline_before_rollout" in log
+    assert "root_eval_ms=2500.00 presearch_ms=2600.00" in log
 
 
 def test_fastmove_without_adaptive_is_an_instant_policy_move(tiny_engine):

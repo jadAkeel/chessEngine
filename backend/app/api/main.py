@@ -119,6 +119,7 @@ class PredictRequest(FenRequest):
 
 
 class FastMoveRequest(FenRequest):
+    game_id: str | None = Field(default=None, max_length=64, pattern=r'^[A-Za-z0-9_-]+$')
     topk: int | None = Field(default=16, ge=1, le=36)
     # UI strength slider: maps to thinking time (FASTMOVE_TIME_BY_DEPTH) unless time_budget_sec is given.
     depth: int | None = Field(default=6, ge=1, le=10)
@@ -1283,10 +1284,16 @@ def fastmove(req: FastMoveRequest):
 
     depth = int(req.depth or 6)
     topk = int(req.topk or 8)
+    game_id = req.game_id or '-'
     if not req.adaptive:
         search_start = time.perf_counter()
         move, value, candidates = _policy_move(model, board, topk)
         total_ms = _elapsed_ms(total_start)
+        logger.info(
+            "/fastmove decision | game=%s ply=%s fen=%s move=%s mode=fast_policy "
+            "value=%+.3f history=%s total_ms=%s",
+            game_id, board.ply(), board.fen(), move.uci(), value, with_history, total_ms,
+        )
         return {
             'move': move.uci(),
             'san': board.san(move),
@@ -1306,11 +1313,18 @@ def fastmove(req: FastMoveRequest):
     proven = int(result.get('completed_simulations') or 0) == 0 and float(result.get('root_value', 0.0)) == 1.0
     root_visits = int(sum(result.get('visit_counts', {}).values()))
     total_ms = _elapsed_ms(total_start)
-    logger.info(
-        f"/fastmove | move={move.uci()} | source={'mate_proof' if proven else 'mcts'} | "
-        f"value={float(result.get('root_value', 0.0)):+.3f} | root_visits={root_visits} | "
-        f"new={result.get('completed_simulations')} | retained={result.get('retained_visits')} | "
-        f"history={with_history} | budget={budget:.2f}s | search_ms={search_ms} | total_ms={total_ms}"
+    mode = 'mate_proof' if proven else ('policy_fallback' if root_visits == 0 else 'searched')
+    presearch_ms = float(result.get('presearch_ms') or 0.0)
+    reason = ('deadline_before_rollout' if presearch_ms >= budget * 1000 else 'no_completed_rollout') if mode == 'policy_fallback' else '-'
+    log = logger.warning if mode == 'policy_fallback' else logger.info
+    log(
+        "/fastmove decision | game=%s ply=%s fen=%s move=%s mode=%s reason=%s "
+        "value=%+.3f root_visits=%s new=%s retained=%s requested=%s history=%s "
+        "budget_ms=%.0f root_eval_ms=%.2f presearch_ms=%.2f search_ms=%s total_ms=%s",
+        game_id, board.ply(), board.fen(), move.uci(), mode, reason,
+        float(result.get('root_value', 0.0)), root_visits,
+        result.get('completed_simulations'), result.get('retained_visits'), cap, with_history,
+        budget * 1000, float(result.get('root_eval_ms') or 0.0), presearch_ms, search_ms, total_ms,
     )
     return {
         'move': move.uci(),

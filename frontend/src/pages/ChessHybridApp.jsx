@@ -156,6 +156,10 @@ function historyPayload(game) {
   return { start_fen: history[0].before, moves: history.map((move) => move.lan) };
 }
 
+function createGameId() {
+  return globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 function EndIcon({ icon, className }) {
   if (icon === "draw") return <CircleEqual className={className} />;
   if (icon === "trophy") return <Trophy className={className} />;
@@ -262,6 +266,7 @@ export default function ChessHybridApp() {
   const wsRef = useRef(null);
   const engineWarmupPromiseRef = useRef(null);
   const engineRequestRef = useRef(0);
+  const gameIdRef = useRef(null);
   const confirmTimerRef = useRef(null);
 
   const [fen, setFen] = useState(gameRef.current.fen());
@@ -547,11 +552,13 @@ export default function ChessHybridApp() {
       if (!serverReady) throw new Error("The engine server did not answer");
 
       const engineDepth = Number(depth);
+      if (!gameIdRef.current) gameIdRef.current = createGameId();
       const res = await fetch(`${API_BASE_URL}/fastmove`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           fen: requestFen,
+          game_id: gameIdRef.current,
           topk: Math.max(10, Math.min(16, engineDepth * 3)),
           depth: engineDepth,
           adaptive: true,
@@ -657,6 +664,7 @@ export default function ChessHybridApp() {
 
   function resetBoardState() {
     cancelEngineRequest();
+    gameIdRef.current = null;
     game.reset();
     syncGame();
     setLastMoveSquares({});

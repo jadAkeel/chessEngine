@@ -97,6 +97,8 @@ def test_search_deadline_returns_available_root_policy():
     assert result['best_move'].uci() == 'e2e4'
     assert sum(result['visit_counts'].values()) == 0
     assert result['root_value'] == 0.25
+    assert result['root_eval_ms'] == 2000.0
+    assert result['presearch_ms'] == 2000.0
 
 
 def test_engine_cache_distinguishes_same_fen_with_different_history():
