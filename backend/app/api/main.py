@@ -1230,7 +1230,7 @@ def _fastmove_budget(board: chess.Board, depth: int) -> tuple[float, str, bool]:
     elif board.fullmove_number <= 10:
         phase, budget = 'opening', 5.0
     else:
-        phase, budget = 'middlegame', 9.0
+        phase, budget = 'middlegame', 7.0
 
     legal_moves = list(board.legal_moves)
     difficult = (

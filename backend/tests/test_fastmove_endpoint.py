@@ -37,7 +37,7 @@ def test_stage_budget_gives_opening_moves_less_time_than_endgames():
     middlegame = chess.Board(chess.STARTING_FEN.replace(" 0 1", " 0 15"))
     endgame = chess.Board("4k3/8/8/8/8/8/8/4K2R w K - 0 40")
     assert _fastmove_budget(opening, 6) == (5.0, "opening", False)
-    assert _fastmove_budget(middlegame, 6) == (9.0, "middlegame", False)
+    assert _fastmove_budget(middlegame, 6) == (7.0, "middlegame", False)
     assert _fastmove_budget(endgame, 6) == (12.0, "endgame", False)
     assert _fastmove_budget(opening, 3)[0] < _fastmove_budget(opening, 6)[0]
 
