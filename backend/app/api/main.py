@@ -179,7 +179,9 @@ def _load_model():
     validate_config(cfg)
 
     device = select_device(cfg.system.device)
-    configure_torch_runtime(cfg, device=str(device), role='api', worker_count=1)
+    thread_plan = configure_torch_runtime(cfg, device=str(device), role='api', worker_count=1)
+    if thread_plan is not None:
+        logger.info("Inference threads | intra=%s interop=%s", thread_plan.intra_threads, thread_plan.interop_threads)
 
     model = ChessNet(cfg).to(device)
 
