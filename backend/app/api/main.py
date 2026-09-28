@@ -1014,7 +1014,6 @@ def _run_mcts(
     *,
     time_limit_sec: float | None = None,
     cumulative: bool = False,
-    inference_batch_limit: int | None = None,
 ) -> dict:
     """Run the shared per-model MCTS and return its raw result.
 
@@ -1029,8 +1028,6 @@ def _run_mcts(
         run = max(1, target - retained)
         logger.info(f"[MCTS START] sims={run} target={target} retained={retained} budget={time_limit_sec}")
         kwargs = {} if time_limit_sec is None else {'time_limit_sec': max(0.01, float(time_limit_sec))}
-        if inference_batch_limit is not None:
-            kwargs['inference_batch_limit'] = inference_batch_limit
         result = mcts.search(board, num_simulations=run, **kwargs)
     move = result.get('best_move')
     if move is None or move not in board.legal_moves:
@@ -1342,10 +1339,7 @@ def fastmove(req: FastMoveRequest):
     budget = float(req.time_budget_sec if req.time_budget_sec is not None else stage_budget)
     cap = int(req.max_simulations) if req.max_simulations else FASTMOVE_DEFAULT_MAX_SIMULATIONS
     search_start = time.perf_counter()
-    result = _run_mcts(
-        model, board, _get_device(), cap, time_limit_sec=budget, cumulative=True,
-        inference_batch_limit=2 if budget <= 12.0 else None,
-    )
+    result = _run_mcts(model, board, _get_device(), cap, time_limit_sec=budget, cumulative=True)
     search_ms = _elapsed_ms(search_start)
     move = result['best_move']
     proven = int(result.get('completed_simulations') or 0) == 0 and float(result.get('root_value', 0.0)) == 1.0

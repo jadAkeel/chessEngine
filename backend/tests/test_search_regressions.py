@@ -101,18 +101,6 @@ def test_search_deadline_returns_available_root_policy():
     assert result['presearch_ms'] == 2000.0
 
 
-def test_short_search_caps_inference_batch_size():
-    batch_sizes = []
-
-    def predict(_model, boards, **_kwargs):
-        batch_sizes.append(len(boards))
-        return np.zeros((len(boards), NUM_MOVES), dtype=np.float32), np.zeros(len(boards))
-
-    with patch('app.mcts.search.predict_boards', side_effect=predict):
-        MCTS(None, AppConfig()).search(chess.Board(), num_simulations=3, inference_batch_limit=2)
-    assert batch_sizes and max(batch_sizes) <= 2
-
-
 def test_engine_cache_distinguishes_same_fen_with_different_history():
     from app.core.engine import Engine
     board = chess.Board()
