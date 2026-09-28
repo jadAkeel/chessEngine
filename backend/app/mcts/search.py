@@ -363,12 +363,15 @@ class MCTS:
         num_simulations: int | None = None,
         temperature: float | None = None,
         time_limit_sec: float | None = None,
+        inference_batch_limit: int | None = None,
     ) -> dict:
         if not isinstance(board, chess.Board):
             raise TypeError("Expected board to be chess.Board")
 
         if time_limit_sec is not None and (not math.isfinite(time_limit_sec) or time_limit_sec <= 0):
             raise ValueError("time_limit_sec must be finite and greater than zero")
+        if inference_batch_limit is not None and inference_batch_limit < 1:
+            raise ValueError("inference_batch_limit must be greater than zero")
         started = time.monotonic()
         deadline = None if time_limit_sec is None else started + time_limit_sec
         self._tactical_penalty_cache.clear()
@@ -402,6 +405,8 @@ class MCTS:
         sims = max(1, int(num_simulations if num_simulations is not None else self.cfg.mcts.num_simulations))
         temperature = float(self.cfg.mcts.temperature if temperature is None else temperature)
         batch_limit = max(1, int(self.cfg.mcts.inference_batch_size))
+        if inference_batch_limit is not None:
+            batch_limit = min(batch_limit, int(inference_batch_limit))
 
         self.logger.debug(
             "mcts start fen=%s sims=%s temperature=%.3f add_noise=%s",

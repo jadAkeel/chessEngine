@@ -7,7 +7,7 @@ import chess
 import pytest
 
 import app.api.main as api
-from app.api.main import FastMoveRequest, _board_from_request, fastmove
+from app.api.main import FastMoveRequest, _board_from_request, _fastmove_budget, fastmove
 from app.infra.config import AppConfig, MCTSConfig, ModelConfig
 from app.model.network import ChessNet
 
@@ -30,6 +30,16 @@ def _history(*ucis):
     for uci in ucis:
         board.push_uci(uci)
     return board
+
+
+def test_stage_budget_gives_opening_moves_less_time_than_endgames():
+    opening = chess.Board()
+    middlegame = chess.Board(chess.STARTING_FEN.replace(" 0 1", " 0 15"))
+    endgame = chess.Board("4k3/8/8/8/8/8/8/4K2R w K - 0 40")
+    assert _fastmove_budget(opening, 6) == (5.0, "opening", False)
+    assert _fastmove_budget(middlegame, 6) == (9.0, "middlegame", False)
+    assert _fastmove_budget(endgame, 6) == (12.0, "endgame", False)
+    assert _fastmove_budget(opening, 3)[0] < _fastmove_budget(opening, 6)[0]
 
 
 def test_cpu_lifespan_warms_inference_before_accepting_requests(monkeypatch):

@@ -122,7 +122,7 @@ class PredictRequest(FenRequest):
 class FastMoveRequest(FenRequest):
     game_id: str | None = Field(default=None, max_length=64, pattern=r'^[A-Za-z0-9_-]+$')
     topk: int | None = Field(default=16, ge=1, le=36)
-    # UI strength slider: maps to thinking time (FASTMOVE_TIME_BY_DEPTH) unless time_budget_sec is given.
+    # UI strength slider: scales the stage-aware thinking time unless time_budget_sec is given.
     depth: int | None = Field(default=6, ge=1, le=10)
     # Cap on root visits for the search (retained visits count towards it).
     max_simulations: int | None = Field(default=None, ge=0, le=1024)
@@ -1014,6 +1014,7 @@ def _run_mcts(
     *,
     time_limit_sec: float | None = None,
     cumulative: bool = False,
+    inference_batch_limit: int | None = None,
 ) -> dict:
     """Run the shared per-model MCTS and return its raw result.
 
@@ -1028,6 +1029,8 @@ def _run_mcts(
         run = max(1, target - retained)
         logger.info(f"[MCTS START] sims={run} target={target} retained={retained} budget={time_limit_sec}")
         kwargs = {} if time_limit_sec is None else {'time_limit_sec': max(0.01, float(time_limit_sec))}
+        if inference_batch_limit is not None:
+            kwargs['inference_batch_limit'] = inference_batch_limit
         result = mcts.search(board, num_simulations=run, **kwargs)
     move = result.get('best_move')
     if move is None or move not in board.legal_moves:
@@ -1214,9 +1217,34 @@ def predict(req: PredictRequest):
     }
 
 
-# Thinking time per UI depth on this CPU (the search also stops early once its move is settled).
-FASTMOVE_TIME_BY_DEPTH = {1: 3.0, 2: 5.0, 3: 7.0, 4: 10.0, 5: 16.0, 6: 30.0, 7: 30.0, 8: 30.0, 9: 30.0, 10: 30.0}
+# The six UI levels scale a stage-aware budget; an explicit API budget still wins.
+FASTMOVE_LEVEL_FACTOR = {1: 0.35, 2: 0.50, 3: 0.65, 4: 0.80, 5: 0.90, 6: 1.00}
 FASTMOVE_DEFAULT_MAX_SIMULATIONS = 400
+
+
+def _fastmove_budget(board: chess.Board, depth: int) -> tuple[float, str, bool]:
+    non_pawn_pieces = sum(
+        len(board.pieces(piece, color))
+        for color in chess.COLORS
+        for piece in (chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN)
+    )
+    if non_pawn_pieces <= 8 or board.fullmove_number >= 35:
+        phase, budget = 'endgame', 12.0
+    elif board.fullmove_number <= 10:
+        phase, budget = 'opening', 5.0
+    else:
+        phase, budget = 'middlegame', 9.0
+
+    legal_moves = list(board.legal_moves)
+    difficult = (
+        board.is_check()
+        or len(legal_moves) <= 8
+        or sum(board.is_capture(move) or move.promotion is not None for move in legal_moves) >= 3
+    )
+    if difficult:
+        budget = min(12.0, budget + 2.0)
+    factor = FASTMOVE_LEVEL_FACTOR.get(depth, 1.0)
+    return max(2.0, round(budget * factor, 1)), phase, difficult
 
 
 def _board_from_request(req: FastMoveRequest) -> tuple[chess.Board, bool]:
@@ -1310,10 +1338,14 @@ def fastmove(req: FastMoveRequest):
             'timing_ms': {'validate': validate_ms, 'search': _elapsed_ms(search_start), 'total': total_ms},
         }
 
-    budget = float(req.time_budget_sec or FASTMOVE_TIME_BY_DEPTH.get(depth, 2.0))
+    stage_budget, phase, difficult = _fastmove_budget(board, depth)
+    budget = float(req.time_budget_sec if req.time_budget_sec is not None else stage_budget)
     cap = int(req.max_simulations) if req.max_simulations else FASTMOVE_DEFAULT_MAX_SIMULATIONS
     search_start = time.perf_counter()
-    result = _run_mcts(model, board, _get_device(), cap, time_limit_sec=budget, cumulative=True)
+    result = _run_mcts(
+        model, board, _get_device(), cap, time_limit_sec=budget, cumulative=True,
+        inference_batch_limit=2 if budget <= 12.0 else None,
+    )
     search_ms = _elapsed_ms(search_start)
     move = result['best_move']
     proven = int(result.get('completed_simulations') or 0) == 0 and float(result.get('root_value', 0.0)) == 1.0
@@ -1324,10 +1356,10 @@ def fastmove(req: FastMoveRequest):
     reason = ('deadline_before_rollout' if presearch_ms >= budget * 1000 else 'no_completed_rollout') if mode == 'policy_fallback' else '-'
     log = logger.warning if mode == 'policy_fallback' else logger.info
     log(
-        "/fastmove decision | game=%s ply=%s fen=%s move=%s mode=%s reason=%s "
+        "/fastmove decision | game=%s ply=%s fen=%s phase=%s difficult=%s move=%s mode=%s reason=%s "
         "value=%+.3f root_visits=%s new=%s retained=%s requested=%s history=%s "
         "budget_ms=%.0f root_eval_ms=%.2f presearch_ms=%.2f search_ms=%s total_ms=%s",
-        game_id, board.ply(), board.fen(), move.uci(), mode, reason,
+        game_id, board.ply(), board.fen(), phase, difficult, move.uci(), mode, reason,
         float(result.get('root_value', 0.0)), root_visits,
         result.get('completed_simulations'), result.get('retained_visits'), cap, with_history,
         budget * 1000, float(result.get('root_eval_ms') or 0.0), presearch_ms, search_ms, total_ms,
