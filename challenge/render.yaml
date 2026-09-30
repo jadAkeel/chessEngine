@@ -1,0 +1,29 @@
+# Optional Render Blueprint for the single-service deployment. In the Render dashboard,
+# create a Blueprint and set the Blueprint path to challenge/render.yaml.
+services:
+  - type: web
+    name: chess-model-challenge
+    runtime: docker
+    branch: codex/challenger
+    rootDir: challenge
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: 0.5c-512mb
+    region: frankfurt
+    healthCheckPath: /api/health
+    autoDeploy: false
+    envVars:
+      # Render's proxy is the only route into the container, so trust its forwarded client address.
+      - key: FORWARDED_ALLOW_IPS
+        value: "*"
+      - key: CHALLENGE_HSTS
+        value: "1"
+      - key: CHALLENGE_CORS_ORIGINS
+        value: ""
+      - key: CHALLENGE_RATE_LIMIT_PER_MINUTE
+        value: "60"
+      - key: CHALLENGE_MAX_CONCURRENT_MOVES
+        value: "4"
+      # Optional comma-separated allowlist, e.g. api.openai.com,api.anthropic.com,*.example.com
+      - key: CHALLENGE_ALLOWED_PROVIDER_HOSTS
+        sync: false

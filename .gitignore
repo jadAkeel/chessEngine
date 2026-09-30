@@ -55,3 +55,4 @@ backend/kaggle/build_mrj*/
 
 # Browser automation artifacts
 .playwright-mcp/
+e2e-output/

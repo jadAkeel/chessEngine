@@ -1,0 +1,5 @@
+# Direct runtime dependencies, pinned to the versions tested and audited for this release.
+fastapi==0.141.1
+uvicorn[standard]==0.54.0
+chess==1.11.2
+aiohttp==3.14.3

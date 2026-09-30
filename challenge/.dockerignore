@@ -1,0 +1,12 @@
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/node_modules
+**/dist
+**/.env
+**/.env.*
+!**/.env.example
+backend/test_api.py
+backend/test_requirements.txt
+e2e
+**/*.test.js

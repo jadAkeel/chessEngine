@@ -1,0 +1,24 @@
+# Public preview only: Free instances sleep after inactivity and have usage limits.
+services:
+  - type: web
+    name: chess-model-challenge-preview
+    runtime: docker
+    branch: codex/challenger
+    rootDir: challenge
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    region: frankfurt
+    healthCheckPath: /api/health
+    autoDeploy: false
+    envVars:
+      - key: FORWARDED_ALLOW_IPS
+        value: "*"
+      - key: CHALLENGE_HSTS
+        value: "1"
+      - key: CHALLENGE_CORS_ORIGINS
+        value: ""
+      - key: CHALLENGE_RATE_LIMIT_PER_MINUTE
+        value: "60"
+      - key: CHALLENGE_MAX_CONCURRENT_MOVES
+        value: "4"
