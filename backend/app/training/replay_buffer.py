@@ -397,7 +397,8 @@ class ReplayBuffer:
         value: float,
         priority: float,
     ) -> float:
-        abs_value = abs(float(value))
+        # NaN marks a policy-only sample (no value target).
+        abs_value = abs(float(value)) if math.isfinite(float(value)) else 0.0
         entropy = _normalized_policy_entropy_from_packed(packed_policy)
         entropy_bonus = 1.0 - entropy
         priority_norm = _clamp01(float(priority) / 10.0)

@@ -100,6 +100,21 @@ def _sparse_policy_loss(logits: torch.Tensor, policy_targets: SparsePolicyBatchT
     return per_sample_policy, log_probs, pred_probs, entropy
 
 
+def _masked_value_loss(pred_values: torch.Tensor, values: torch.Tensor, weights: torch.Tensor):
+    """MSE over samples with a finite value target; NaN marks policy-only samples.
+
+    Returns the per-sample loss (zero where masked), the weighted mean over the
+    unmasked samples, and the mask.
+    """
+    values = values.view(-1)
+    mask = torch.isfinite(values)
+    safe_targets = torch.where(mask, values, torch.zeros_like(values))
+    per_sample = F.mse_loss(pred_values.view(-1), safe_targets, reduction='none')
+    per_sample = torch.where(mask, per_sample, torch.zeros_like(per_sample))
+    loss = (weights * per_sample).sum() / mask.sum().clamp(min=1)
+    return per_sample, loss, mask
+
+
 def _flip_square_horizontal(square: int) -> int:
     import chess
     rank = chess.square_rank(square)
@@ -323,8 +338,10 @@ def train_model(
                     pred_value_std = float(pred_values.std().item())
                     pred_value_abs = float(pred_values.abs().mean().item())
 
-                    target_value_mean = float(values.mean().item())
-                    target_value_std = float(values.std().item())
+                    finite_values = values[torch.isfinite(values)]
+                    target_value_mean = float(finite_values.mean().item()) if finite_values.numel() else 0.0
+                    target_value_std = float(finite_values.std().item()) if finite_values.numel() > 1 else 0.0
+                    value_target_ratio = float(finite_values.numel()) / max(1, int(values.numel()))
 
                     top_k = min(2, pred_probs.size(1))
                     top_probs, _ = torch.topk(pred_probs, k=top_k, dim=1)
@@ -333,12 +350,11 @@ def train_model(
                     gap_mean = float((top_probs[:, 0] - top_probs[:, 1]).mean().item()) if top_k > 1 else 0.0
 
                     entropy_val = float((-(pred_probs * log_probs).sum(dim=1)).mean().item())
-                    draw_ratio = float((values.abs() < 0.1).float().mean().item())
+                    draw_ratio = float((finite_values.abs() < 0.1).float().mean().item()) if finite_values.numel() else 0.0
 
-            per_sample_value = F.mse_loss(pred_values, values, reduction='none').squeeze(1)
+            per_sample_value, value_loss, _ = _masked_value_loss(pred_values, values, is_weights)
 
             policy_loss = (is_weights * per_sample_policy).mean()
-            value_loss = (is_weights * per_sample_value).mean()
             loss = policy_loss + value_loss_coeff * value_loss - entropy_coeff * entropy
 
         if not bool(torch.isfinite(loss).item()):
@@ -388,7 +404,8 @@ def train_model(
                 f"top2={top2_mean:.3f} "
                 f"gap={gap_mean:.3f} "
                 f"entropy={entropy_val:.3f} "
-                f"draw_ratio={draw_ratio:.3f}",
+                f"draw_ratio={draw_ratio:.3f} "
+                f"value_targets={value_target_ratio:.3f}",
                 flush=True,
             )
 
@@ -441,10 +458,12 @@ def evaluate_model_on_samples(
     entropy_coeff = float(cfg.training.entropy_coeff)
     label_smoothing = float(getattr(cfg.training, 'policy_label_smoothing', 0.0))
 
-    losses = []
     policy_losses = []
-    value_losses = []
     entropies = []
+    # Value loss is averaged over samples that carry a value target, not per
+    # batch, so batches of policy-only samples do not pull it towards zero.
+    value_loss_sum = 0.0
+    value_count = 0
 
     was_training = model.training
     model.eval()
@@ -484,24 +503,27 @@ def evaluate_model_on_samples(
                     label_smoothing,
                 )
 
-            per_sample_value = F.mse_loss(pred_values, values_t, reduction='none').squeeze(1)
+            _, value_loss, value_mask = _masked_value_loss(pred_values, values_t, weights_t)
             policy_loss = (weights_t * per_sample_policy).mean()
-            value_loss = (weights_t * per_sample_value).mean()
-            loss = policy_loss + value_loss_coeff * value_loss - entropy_coeff * entropy
+            batch_value_count = int(value_mask.sum().item())
 
-            losses.append(float(loss.item()))
             policy_losses.append(float(policy_loss.item()))
-            value_losses.append(float(value_loss.item()))
+            value_loss_sum += float(value_loss.item()) * batch_value_count
+            value_count += batch_value_count
             entropies.append(float(entropy.item()))
 
     if was_training:
         model.train()
 
+    policy_loss_mean = float(np.mean(policy_losses)) if policy_losses else 0.0
+    value_loss_mean = value_loss_sum / value_count if value_count else 0.0
+    entropy_mean = float(np.mean(entropies)) if entropies else 0.0
     return {
-        'loss': float(np.mean(losses)) if losses else 0.0,
-        'policy_loss': float(np.mean(policy_losses)) if policy_losses else 0.0,
-        'value_loss': float(np.mean(value_losses)) if value_losses else 0.0,
-        'entropy': float(np.mean(entropies)) if entropies else 0.0,
-        'batches': len(losses),
+        'loss': policy_loss_mean + value_loss_coeff * value_loss_mean - entropy_coeff * entropy_mean,
+        'policy_loss': policy_loss_mean,
+        'value_loss': value_loss_mean,
+        'entropy': entropy_mean,
+        'batches': len(policy_losses),
         'samples': len(samples),
+        'value_samples': value_count,
     }

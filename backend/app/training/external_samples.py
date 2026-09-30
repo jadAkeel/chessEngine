@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import struct
 import random  # 🔥 أضفناها
@@ -93,6 +94,11 @@ def _multi_move_policy(indices: np.ndarray, probs: np.ndarray, fallback_idx: int
     )
 
 
+def _value_masked(path: Path, external_cfg) -> bool:
+    patterns = [p.strip() for p in str(getattr(external_cfg, 'value_mask_glob', '') or '').split(',')]
+    return any(p and fnmatch.fnmatch(path.name, p) for p in patterns)
+
+
 def _decoded_fullmove_number(state: np.ndarray, cfg: AppConfig) -> int:
     max_fullmove = max(1, int(getattr(cfg.system, "max_fullmove", 1)))
     encoded = float(state[FULLMOVE_NUMBER_PLANE, 0, 0])
@@ -163,9 +169,16 @@ def load_external_samples_with_stats(
             "External sample arrays must have matching first dimension: "
             f"states={len(states)} policy_indices={len(policy_indices)} values={len(values)}"
         )
+    external_cfg = getattr(cfg, 'external', None)
+    mask_values = _value_masked(path, external_cfg)
+    if mask_values:
+        values = np.full(len(values), np.nan, dtype=np.float32)
+        print("[LOAD] value targets masked (policy-only shard)")
+
     # Optional multi-move targets (e.g. several engine-scored moves per position).
     topk_indices = topk_probs = None
-    if 'policy_topk_indices' in data and 'policy_topk_probs' in data:
+    use_topk = bool(getattr(external_cfg, 'use_topk_policy', True))
+    if use_topk and 'policy_topk_indices' in data and 'policy_topk_probs' in data:
         topk_indices = np.asarray(data['policy_topk_indices'], dtype=np.int32)
         topk_probs = np.asarray(data['policy_topk_probs'], dtype=np.float32)
         if topk_indices.shape != topk_probs.shape or topk_indices.shape[0] != len(states):
@@ -176,7 +189,6 @@ def load_external_samples_with_stats(
     total_raw = len(states)
     print(f"[LOAD] raw samples={total_raw}")
 
-    external_cfg = getattr(cfg, 'external', None)
     dedup_enabled = bool(getattr(external_cfg, 'dedup', True))
     filter_invalid = bool(getattr(external_cfg, 'filter_invalid', True))
     drop_zero_states = bool(getattr(external_cfg, 'drop_zero_states', True))
@@ -217,7 +229,7 @@ def load_external_samples_with_stats(
                 stats["bad_policy"] += 1
                 continue
 
-            if not np.isfinite(value):
+            if not mask_values and not np.isfinite(value):
                 stats["bad_value"] += 1
                 continue
 

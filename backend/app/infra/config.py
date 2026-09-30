@@ -68,6 +68,11 @@ class ExternalDataConfig:
     dedup: bool = True
     filter_invalid: bool = True
     drop_zero_states: bool = True
+    # Comma-separated file-name globs (e.g. "lichess_eval*"): shards whose values
+    # are ignored (NaN), so they only train the policy.
+    value_mask_glob: str = ""
+    # Use policy_topk_* arrays when a shard has them; off = one-hot best move.
+    use_topk_policy: bool = True
     checkpoint_prefix: str = "external"
     save_dir: str = "models/external"
     benchmark_games: int = 8

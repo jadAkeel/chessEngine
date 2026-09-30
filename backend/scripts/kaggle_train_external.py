@@ -184,6 +184,8 @@ def _write_config(args: argparse.Namespace) -> Path:
         f"  dedup: {str(args.dedup).lower()}",
         f"  filter_invalid: {str(args.filter_invalid).lower()}",
         f"  drop_zero_states: {str(args.drop_zero_states).lower()}",
+        *([f"  value_mask_glob: {_yaml_string(args.value_mask_glob)}"] if getattr(args, "value_mask_glob", "") else []),
+        *(["  use_topk_policy: false"] if getattr(args, "no_topk_policy", False) else []),
         "  checkpoint_prefix: external",
         f"  save_dir: {_yaml_string(args.save_dir)}",
         f"  benchmark_games: {int(args.benchmark_games)}",
@@ -433,6 +435,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(filter_invalid=True)
     parser.add_argument("--keep-zero-states", dest="drop_zero_states", action="store_false")
     parser.set_defaults(drop_zero_states=True)
+    parser.add_argument(
+        "--value-mask-glob", default="",
+        help="Comma-separated shard-name globs whose value targets are ignored (policy-only data)",
+    )
+    parser.add_argument(
+        "--no-topk-policy", action="store_true",
+        help="Ignore policy_topk_* arrays and train on the one-hot best move",
+    )
 
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument("--max-val-samples", type=int, default=None)
