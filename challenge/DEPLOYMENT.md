@@ -9,10 +9,12 @@ The public release runs the frontend and API in one Docker web service. Visitors
 - Published: 2026-09-30, Free preview plan.
 - Initial application commit: `c6ee2a3395f3843e8d56f714e550315ee155b0df`.
 - [Release workflow](https://github.com/jadAkeel/chessEngine/actions/runs/36726506057): frontend/backend checks, Linux image build and container smoke check passed.
+- Settings update deployed commit: `d53bd953bc7ae644521aa694a93e414c5f520869`, deploy `dep-daui7lgu01pc73fbsg90` (Live).
+- [Settings release workflow](https://github.com/jadAkeel/chessEngine/actions/runs/36733130140): all release checks passed.
 
 The public URL passed browser checks for the desktop/mobile UI, sample isolation, reload, health, security headers and private-provider URL rejection. No model inference calls were made during the public smoke check. Local verification passed 41 backend tests, 12 frontend tests and 11 browser journeys with scripted providers.
 
-The settings update adds optional temperature, three suggested budgets, a shared preset action, and provider-reported input/output usage. Local verification passed 45 backend tests, 15 frontend tests, the frontend build and 12 browser journeys, including temperature zero, credential preservation, Anthropic validation, report settings and controls locking after a move. Real provider inference was not used for this update; model-specific parameter support still depends on the provider.
+The settings update adds optional temperature, three suggested budgets, a shared preset action, and provider-reported input/output usage. Local verification passed 45 backend tests, 15 frontend tests, the frontend build and 12 browser journeys, including temperature zero, credential preservation, Anthropic validation, report settings and controls locking after a move. The published update passed browser checks for mobile presets, temperature zero, the settings warning, Gemini guidance and health. Real provider inference was not used for this update; model-specific parameter support still depends on the provider.
 
 The paid template is ready but has not been provisioned. Render reported `need_payment_info` when validating it against the account. Moving to an always-on paid plan requires the operator's cost approval and payment information.
 
