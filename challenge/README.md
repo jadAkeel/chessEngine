@@ -6,7 +6,7 @@ For the public release, see [DEPLOYMENT.md](DEPLOYMENT.md). Visitors use their o
 
 ## How a match works
 
-1. Configure **Model A** and **Model B**: provider or compatible protocol, base URL (custom providers), model ID, API key, and optional reasoning effort, output-token limit and timeout.
+1. Configure **Model A** and **Model B**: provider or compatible protocol, base URL (custom providers), model ID, API key, and optional reasoning effort, output-token limit, temperature and timeout.
 2. **Test connection** asks the provider for one opening move and verifies it. Nothing is recorded; the provider may bill the request.
 3. **Start match** plays automatically; **One move** plays a single half-move. The default format is two games with colors swapped (A is White in game 1, B is White in game 2). A single game is also available.
 4. The browser asks the challenge API for one move at a time. The API rebuilds the position from the UCI history, sends the side to move the same prompt (board diagram, FEN, UCI and SAN history, every legal move) and accepts only a legal move. It reads the last JSON object containing `"move"` in the reply, ignoring surrounding prose, code fences and `<think>` blocks, and accepts UCI or unambiguous SAN; the same rules apply to both players. One invalid answer gets one corrected retry, shown as "retry" in the move list.
@@ -18,6 +18,12 @@ Settings lock after the first move so every move of a match uses the same config
 Explanations are **public move rationales written by each model**, not private chain-of-thought.
 
 ### Reasoning and token budget
+
+The setup offers three starting presets: **Economy** (2048 output tokens, 120 s), **Balanced — recommended** (4096, 180 s), and **Extended** (16000, 240 s). They leave reasoning and temperature at provider defaults and preserve the provider, model, key and endpoint. Apply a preset to both models to start with matching settings; these are practical budgets, not measured optimal chess settings. Reasoning models may need the Extended budget to finish a move. Settings can still be adjusted before the match starts.
+
+**Input tokens** are determined by the complete board prompt and move history, then counted by each provider's tokenizer. They are displayed when the provider reports usage, but are not an adjustable generation limit: truncating the position or history would change the information available to the players. Equal prompts can have different input-token counts across models. **Max output tokens** is a ceiling per provider request, not a guaranteed charge or a whole-match budget; connection tests and retries are separate requests.
+
+**Temperature** is optional: leave it blank to omit it and use the provider default. An explicit value is sent unchanged (`0` is valid), with an app range of 0–2, or 0–1 for Anthropic protocols. Some models reject temperature overrides; return to provider default if the provider rejects it. Anthropic with explicitly enabled reasoning accepts only unset or `1`, and some newer Claude models accept only defaults regardless of reasoning ([Claude API guidance](https://platform.claude.com/docs/en/claude_api_primer)). Google recommends the default `1.0` for Gemini 3 models ([Gemini guide](https://ai.google.dev/gemini-api/docs/gemini-3?hl=en)). Lower temperature does not guarantee deterministic play.
 
 `Max output tokens` (default 16000, up to 64000) covers reasoning tokens too, so keep it generous for reasoning models; some providers cap it lower and answer HTTP 400, in which case lower it. The default timeout is 120 s (up to 600). With `Provider default` nothing extra is sent, and models differ: some reason by default, others do not. Other levels map to:
 
@@ -32,7 +38,7 @@ Explanations are **public move rationales written by each model**, not private c
 
 A reply cut off by the token limit, or declined by the provider's safety system, fails the turn immediately with that reason instead of a generic error.
 
-The UI warns when the two models use different reasoning, token or timeout settings, and the report records `settings_match` and the differences.
+The UI warns when the two models use different reasoning, output-token, temperature or timeout settings, and the report records `settings_match` and the differences. Matching controls do not guarantee identical internal reasoning budgets or sampling: providers interpret their defaults and effort levels differently.
 
 ### Failures and recovery
 

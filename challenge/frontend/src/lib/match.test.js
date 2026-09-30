@@ -4,7 +4,10 @@ import { Chess } from 'chess.js'
 import {
   applyUci, buildReport, colorOf, fenAt, formatPoints, matchScore, modelFor, pgnFor, resolveOutcome, winnerOf,
 } from './match.js'
-import { INITIAL_PLAYER, baseUrlProblem, endpointPreview, playerProblems, publicPlayer, requestPlayer } from './providers.js'
+import {
+  INITIAL_PLAYER, SETTINGS_PRESETS, applySettingsPreset, baseUrlProblem, endpointPreview, playerProblems,
+  publicPlayer, requestPlayer, selectedSettingsPreset, settingDifferences,
+} from './providers.js'
 import { MoveError, redactKey, requestMove } from './api.js'
 
 const players = {
@@ -135,6 +138,54 @@ test('setup validation explains bad custom URLs and fields', () => {
   assert.deepEqual(playerProblems(players.A), {})
   const problems = playerProblems({ ...INITIAL_PLAYER, max_tokens: 10 })
   assert.deepEqual(Object.keys(problems).sort(), ['api_key', 'base_url', 'max_tokens', 'model'])
+})
+
+test('optional temperature preserves zero and provider defaults in requests and reports', () => {
+  for (const temperature of ['', '  ', null, undefined]) {
+    assert.equal(requestPlayer({ ...players.A, temperature }).temperature, null)
+    assert.equal(publicPlayer({ ...players.A, temperature }).temperature, null)
+  }
+  assert.equal(requestPlayer({ ...players.A, temperature: '0' }).temperature, 0)
+  assert.equal(publicPlayer({ ...players.A, temperature: 0 }).temperature, 0)
+  assert.deepEqual(settingDifferences({ A: players.A, B: { ...players.B, temperature: 0 } }), [
+    { field: 'temperature', label: 'Temperature', A: null, B: 0 },
+  ])
+  const report = buildReport({ mode: 'paired', players: { A: { ...players.A, temperature: 0 }, B: players.B }, games: [] })
+  assert.equal(report.models.A.temperature, 0)
+  assert.equal(report.settings_match, false)
+  assert.ok(!JSON.stringify(report).includes(players.A.api_key))
+})
+
+test('temperature validation follows protocol bounds and Anthropic thinking constraints', () => {
+  for (const temperature of [-0.1, 2.1, Infinity, NaN, 'invalid']) {
+    assert.ok(playerProblems({ ...players.A, temperature }).temperature)
+  }
+  for (const temperature of [0, 1, 2, '']) assert.deepEqual(playerProblems({ ...players.A, temperature }), {})
+  assert.ok(playerProblems({ ...players.B, temperature: 1.1 }).temperature)
+  assert.ok(playerProblems({ ...players.A, provider: 'custom_anthropic', temperature: 1.1 }).temperature)
+  assert.ok(playerProblems({ ...players.B, reasoning: 'high', temperature: 0 }).temperature)
+  for (const temperature of ['', 1]) assert.deepEqual(playerProblems({ ...players.B, reasoning: 'high', temperature }), {})
+})
+
+test('starting presets preserve connection details and set matching budgets with provider defaults', () => {
+  const original = { ...players.A, reasoning: 'high', temperature: 0.5, token_parameter: 'max_completion_tokens' }
+  for (const preset of SETTINGS_PRESETS) {
+    const applied = applySettingsPreset(original, preset.value)
+    assert.equal(applied.model, original.model)
+    assert.equal(applied.api_key, original.api_key)
+    assert.equal(applied.provider, original.provider)
+    assert.equal(applied.base_url, original.base_url)
+    assert.equal(applied.token_parameter, original.token_parameter)
+    assert.equal(applied.max_tokens, preset.max_tokens)
+    assert.equal(applied.timeout_seconds, preset.timeout_seconds)
+    assert.equal(applied.reasoning, 'default')
+    assert.equal(applied.temperature, '')
+    assert.equal(selectedSettingsPreset(applied), preset.value)
+    assert.deepEqual(settingDifferences({ A: applied, B: applySettingsPreset(players.B, preset.value) }), [])
+    assert.equal(selectedSettingsPreset({ ...applied, temperature: 0 }), 'custom')
+  }
+  assert.equal(applySettingsPreset(original, 'unknown'), original)
+  assert.equal(original.temperature, 0.5)
 })
 
 test('reliability counts failed requests and retried moves per model across swapped games', async () => {

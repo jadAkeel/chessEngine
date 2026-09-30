@@ -59,6 +59,7 @@ class PlayerConfig(BaseModel):
     token_parameter: str = Field(default="auto", pattern=r"^(auto|max_tokens|max_completion_tokens)$")
     max_tokens: int = Field(default=16000, ge=256, le=64000)
     timeout_seconds: int = Field(default=120, ge=10, le=600)
+    temperature: float | None = Field(default=None, ge=0, le=2, allow_inf_nan=False)
 
     @field_validator("api_key")
     @classmethod
@@ -276,10 +277,14 @@ def _request_details(player: PlayerConfig, board: chess.Board, retry: bool) -> t
         }
         if player.reasoning != "default":
             body["reasoning_effort"] = player.reasoning
+        if player.temperature is not None:
+            body["temperature"] = player.temperature
         return f"{base}/chat/completions", {"Authorization": f"Bearer {player.api_key}"}, body
     if player.provider == "gemini":
         _allowed_base_url("https://generativelanguage.googleapis.com")
         config = {"maxOutputTokens": player.max_tokens, "responseMimeType": "application/json"}
+        if player.temperature is not None:
+            config["temperature"] = player.temperature
         thinking = _gemini_thinking(player)
         if thinking:
             config["thinkingConfig"] = thinking
@@ -288,12 +293,19 @@ def _request_details(player: PlayerConfig, board: chess.Board, retry: bool) -> t
             {"x-goog-api-key": player.api_key},
             {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": config},
         )
+    if player.temperature is not None:
+        if player.temperature > 1:
+            raise HTTPException(400, "Anthropic temperature must be between 0 and 1, or use provider default")
+        if player.reasoning != "default" and player.temperature != 1:
+            raise HTTPException(400, "Anthropic reasoning requires temperature 1 or provider default")
     body = {
         "model": player.model,
         "max_tokens": player.max_tokens,
         "messages": [{"role": "user", "content": prompt}],
     }
     body.update(_anthropic_thinking(player))
+    if player.temperature is not None:
+        body["temperature"] = player.temperature
     base = _allowed_base_url(
         player.base_url if player.provider == "anthropic_compatible" else None,
         "https://api.anthropic.com/v1",
@@ -359,7 +371,7 @@ def _status_failure(status: int) -> ProviderFailure:
         return ProviderFailure("Provider endpoint or model was not found (HTTP 404); check the base URL and model ID")
     if status in (400, 413, 422):
         return ProviderFailure(
-            f"Provider rejected the request (HTTP {status}); check the model ID, reasoning, and token settings")
+            f"Provider rejected the request (HTTP {status}); check the model ID, reasoning, temperature, and token settings")
     if 300 <= status < 400:
         return ProviderFailure(f"Provider redirected the request (HTTP {status}); use the final API base URL")
     if status >= 500:

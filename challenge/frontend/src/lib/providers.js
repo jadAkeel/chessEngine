@@ -49,7 +49,31 @@ export const PROVIDERS = [
 
 export const INITIAL_PLAYER = {
   provider: 'custom', model: '', api_key: '', base_url: '', token_parameter: 'auto',
-  reasoning: 'default', max_tokens: 16000, timeout_seconds: 120,
+  reasoning: 'default', temperature: '', max_tokens: 16000, timeout_seconds: 120,
+}
+
+export const SETTINGS_PRESETS = [
+  { value: 'economy', label: 'Economy', max_tokens: 2048, timeout_seconds: 120, description: 'Smaller output cap; reasoning models may run out of tokens before returning a move.' },
+  { value: 'balanced', label: 'Balanced · recommended starting point', max_tokens: 4096, timeout_seconds: 180, description: 'A practical starting budget. Increase it if the model runs out of output tokens.' },
+  { value: 'extended', label: 'Extended thinking', max_tokens: 16000, timeout_seconds: 240, description: 'More room and time for reasoning; can cost more. Provider limits still apply.' },
+]
+
+export function applySettingsPreset(player, name) {
+  const preset = SETTINGS_PRESETS.find(item => item.value === name)
+  if (!preset) return player
+  return { ...player, reasoning: 'default', temperature: '', max_tokens: preset.max_tokens, timeout_seconds: preset.timeout_seconds }
+}
+
+export function normalizedTemperature(player) {
+  const value = player.temperature
+  return value == null || (typeof value === 'string' && !value.trim()) ? null : Number(value)
+}
+
+export function selectedSettingsPreset(player) {
+  return SETTINGS_PRESETS.find(item =>
+    player.reasoning === 'default' && normalizedTemperature(player) === null &&
+    Number(player.max_tokens) === item.max_tokens && Number(player.timeout_seconds) === item.timeout_seconds,
+  )?.value || 'custom'
 }
 
 export const providerInfo = value => PROVIDERS.find(item => item.value === value) || PROVIDERS[0]
@@ -74,6 +98,7 @@ export function requestPlayer(player) {
     api_key: player.api_key.trim(),
     base_url: info.needsUrl ? resolvedBaseUrl(player) : info.value === 'openrouter' ? info.fixedUrl : '',
     reasoning: player.reasoning,
+    temperature: normalizedTemperature(player),
     token_parameter: info.protocol === 'openai_compatible' ? player.token_parameter : 'auto',
     max_tokens: Number(player.max_tokens),
     timeout_seconds: Number(player.timeout_seconds),
@@ -86,6 +111,7 @@ export function publicPlayer(player) {
   return {
     provider: info.label, protocol: info.protocol, base_url: resolvedBaseUrl(player) || null,
     model: player.model.trim(), reasoning: player.reasoning,
+    temperature: normalizedTemperature(player),
     token_parameter: info.protocol === 'openai_compatible' ? player.token_parameter : 'auto',
     max_tokens: Number(player.max_tokens), timeout_seconds: Number(player.timeout_seconds),
   }
@@ -106,6 +132,7 @@ export function baseUrlProblem(raw) {
 
 const COMPARED = [
   { field: 'reasoning', label: 'Reasoning effort', value: player => player.reasoning },
+  { field: 'temperature', label: 'Temperature', value: normalizedTemperature },
   { field: 'max_tokens', label: 'Max output tokens', value: player => Number(player.max_tokens) },
   { field: 'timeout_seconds', label: 'Timeout', value: player => Number(player.timeout_seconds) },
 ]
@@ -133,5 +160,14 @@ export function playerProblems(player) {
   if (!Number.isInteger(tokens) || tokens < 256 || tokens > 64000) problems.max_tokens = 'Use a whole number from 256 to 64000.'
   const timeout = Number(player.timeout_seconds)
   if (!Number.isInteger(timeout) || timeout < 10 || timeout > 600) problems.timeout_seconds = 'Use a whole number from 10 to 600.'
+  const temperature = normalizedTemperature(player)
+  const anthropic = ['anthropic', 'anthropic_compatible'].includes(info.protocol)
+  if (temperature !== null) {
+    if (!Number.isFinite(temperature) || temperature < 0 || temperature > (anthropic ? 1 : 2)) {
+      problems.temperature = `Use a number from 0 to ${anthropic ? 1 : 2}, or leave blank for the provider default.`
+    } else if (anthropic && player.reasoning !== 'default' && temperature !== 1) {
+      problems.temperature = 'With Anthropic thinking, leave temperature blank or set it to 1.'
+    }
+  }
   return problems
 }

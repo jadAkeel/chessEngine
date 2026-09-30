@@ -92,6 +92,71 @@ def test_custom_anthropic_compatible_endpoint_uses_messages_protocol():
     assert body["max_tokens"] == 16000
 
 
+def test_temperature_is_optional_and_zero_is_sent_without_changing_board_prompt():
+    board = api._board_from_moves(["e2e4", "c7c5", "g1f3"])
+    for provider in ("openai_compatible", "gemini", "anthropic", "anthropic_compatible"):
+        _, _, default = api._request_details(player(provider=provider), board, False)
+        _, _, explicit_default = api._request_details(player(provider=provider, temperature=None), board, False)
+        assert explicit_default == default
+        config = default["generationConfig"] if provider == "gemini" else default
+        assert "temperature" not in config
+        for temperature in (0, 0.7, 1):
+            _, _, body = api._request_details(player(provider=provider, temperature=temperature), board, False)
+            config = body["generationConfig"] if provider == "gemini" else body
+            assert config["temperature"] == temperature
+            if provider == "gemini":
+                assert body["contents"] == default["contents"]
+                prompt = body["contents"][0]["parts"][0]["text"]
+            else:
+                assert body["messages"] == default["messages"]
+                prompt = body["messages"][0]["content"]
+            assert prompt == api._prompt(board, False)
+
+
+def test_temperature_range_is_finite_and_provider_limits_are_respected():
+    for invalid in (-0.1, 2.1, float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError):
+            player(temperature=invalid)
+    for provider in ("openai_compatible", "gemini"):
+        _, _, body = api._request_details(player(provider=provider, temperature=2), chess.Board(), False)
+        config = body["generationConfig"] if provider == "gemini" else body
+        assert config["temperature"] == 2
+    for provider in ("anthropic", "anthropic_compatible"):
+        with pytest.raises(HTTPException) as caught:
+            api._request_details(player(provider=provider, temperature=1.1), chess.Board(), False)
+        assert caught.value.status_code == 400
+        assert "between 0 and 1" in caught.value.detail
+
+
+def test_anthropic_explicit_reasoning_rejects_incompatible_temperature():
+    for provider in ("anthropic", "anthropic_compatible"):
+        for temperature in (0, 0.7):
+            with pytest.raises(HTTPException) as caught:
+                api._request_details(player(provider=provider, reasoning="high", temperature=temperature), chess.Board(), False)
+            assert caught.value.status_code == 400
+            assert "temperature 1 or provider default" in caught.value.detail
+        for temperature in (None, 1):
+            _, _, body = api._request_details(player(provider=provider, reasoning="high", temperature=temperature), chess.Board(), False)
+            assert body["thinking"]
+            if temperature is None:
+                assert "temperature" not in body
+            else:
+                assert body["temperature"] == 1
+
+
+def test_temperature_validation_errors_never_echo_api_key_or_call_provider(monkeypatch):
+    async def unexpected_ask(*args):
+        raise AssertionError("Invalid controls must not reach the provider")
+
+    monkeypatch.setattr(api, "_ask_provider", unexpected_ask)
+    with TestClient(api.app) as client:
+        response = client.post("/api/move", json={"player": {
+            "provider": "openai_compatible", "model": "test-model", "api_key": "top-secret", "temperature": 2.1,
+        }})
+    assert response.status_code == 422
+    assert "top-secret" not in response.text
+
+
 def test_both_colors_receive_same_oriented_board_and_legal_choices():
     white = api._prompt(chess.Board(), False)
     assert "Side to move: White" in white
@@ -275,6 +340,7 @@ def test_provider_error_statuses_map_to_safe_actionable_messages():
     assert "model" in api._status_failure(404).message
     assert api._status_failure(503).status == 503
     assert "redirect" in api._status_failure(307).message
+    assert "temperature" in api._status_failure(400).message
 
 
 def test_chunked_oversized_request_is_rejected_without_content_length():

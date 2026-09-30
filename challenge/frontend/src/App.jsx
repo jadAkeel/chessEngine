@@ -7,7 +7,7 @@ import {
 } from 'lucide-react'
 import PlayerSetup from './components/PlayerSetup.jsx'
 import SampleReplay from './components/SampleReplay.jsx'
-import { INITIAL_PLAYER, playerProblems, providerInfo, settingDifferences } from './lib/providers.js'
+import { INITIAL_PLAYER, SETTINGS_PRESETS, applySettingsPreset, playerProblems, providerInfo, settingDifferences } from './lib/providers.js'
 import { MoveError, requestMove } from './lib/api.js'
 import {
   MAX_PLIES, applyUci, buildReport, displayResult, fenAt, formatPoints, gameCount, matchScore,
@@ -101,6 +101,7 @@ export default function App() {
   const verificationIdRef = useRef({ A: 0, B: 0 })
   const [players, setPlayers] = useState({ A: { ...INITIAL_PLAYER }, B: { ...INITIAL_PLAYER } })
   const [mode, setMode] = useState('paired')
+  const [startingPreset, setStartingPreset] = useState('balanced')
   const [games, setGames] = useState([])
   const [running, setRunning] = useState(false)
   const [stepQueued, setStepQueued] = useState(false)
@@ -162,6 +163,12 @@ export default function App() {
     setVerification(previous => ({ ...previous, [model]: null }))
     setPlayers(previous => ({ ...previous, [model]: next }))
     if (error?.kind === 'setup') setError(null)
+  }
+
+  const applyPresetToBoth = () => {
+    if (locked) return
+    for (const model of ['A', 'B']) updatePlayer(model, applySettingsPreset(players[model], startingPreset))
+    setAnnouncement('Starting preset applied to both models. Reasoning and temperature use the provider default.')
   }
 
   const verifyPlayer = async model => {
@@ -447,7 +454,7 @@ export default function App() {
           </div>
           <ol className="setup-steps" aria-label="How to run a challenge">
             <li><strong>Connect two models</strong><span>Choose a provider or compatible custom endpoint and enter your own API keys.</span></li>
-            <li><strong>Match their budgets</strong><span>Set reasoning, output tokens and timeout. Use two games to swap colors.</span></li>
+            <li><strong>Match their budgets</strong><span>Apply a shared starting preset or set reasoning, temperature, output tokens and timeout. Use two games to swap colors.</span></li>
             <li><strong>Start and compare</strong><span>Watch the match, review moves, and export PGN or a JSON report.</span></li>
           </ol>
           <p className="welcome-billing">Your provider bills API calls under your account. Connection checks also make a model request. Keep this tab open while a match runs.</p>
@@ -573,10 +580,23 @@ export default function App() {
                 <label><input type="radio" name="mode" value="single" checked={mode === 'single'} onChange={() => setMode('single')} /><span>Single game</span></label>
               </div>
             </fieldset>
+            <fieldset className="mode-card preset-card" disabled={locked}>
+              <legend className="eyebrow">Suggested settings</legend>
+              <div className="preset-controls">
+                <div className="field">
+                  <label htmlFor="shared-starting-preset">Shared starting preset</label>
+                  <select id="shared-starting-preset" value={startingPreset} aria-describedby="shared-preset-hint" onChange={event => setStartingPreset(event.target.value)}>
+                    {SETTINGS_PRESETS.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
+                  </select>
+                </div>
+                <button type="button" className="button secondary" onClick={applyPresetToBoth}>Apply to both models</button>
+              </div>
+              <p id="shared-preset-hint" className="fine-print">{SETTINGS_PRESETS.find(item => item.value === startingPreset).description} Sets matching output caps and timeouts; reasoning and temperature use each provider's default. These are starting points, not measured optimal settings.</p>
+            </fieldset>
             {differences.length > 0 && (
               <div className="settings-warning" role="note">
                 <strong>Settings differ between the models.</strong> Results are fairer when both use the same budget:
-                <ul>{differences.map(item => <li key={item.field}>{item.label}: A {item.A} · B {item.B}</li>)}</ul>
+                <ul>{differences.map(item => <li key={item.field}>{item.label}: A {item.A ?? 'provider default'} · B {item.B ?? 'provider default'}</li>)}</ul>
               </div>
             )}
             {['A', 'B'].map(model => (
@@ -618,6 +638,7 @@ export default function App() {
                   <span><Clock3 size={13} aria-hidden="true" /> {seconds(selected.elapsed_ms)}</span>
                   <span><Zap size={13} aria-hidden="true" /> {totalTokens(selected.usage) ?? '—'} tokens{typeof selected.usage?.reasoning_tokens === 'number' ? ` (${selected.usage.reasoning_tokens} reasoning)` : ''}</span>
                 </div>
+                <p className="fine-print">Provider-reported usage: input {selected.usage?.input_tokens ?? '—'} · output {selected.usage?.output_tokens ?? '—'}. Reasoning accounting depends on the provider.</p>
                 <p className="fine-print">Public rationale written by the model with its move, not private chain-of-thought.</p>
               </div>
             ) : (

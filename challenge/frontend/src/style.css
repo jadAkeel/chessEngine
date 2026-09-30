@@ -202,6 +202,9 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', m
 .field input::placeholder { color: #7d8c82; }
 .field input:focus, .field select:focus { border-color: var(--accent); }
 .field input[aria-invalid="true"] { border-color: var(--danger-border); }
+.preset-controls { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 10px; }
+.preset-controls .field { flex: 1 1 220px; }
+.preset-card .fine-print { margin-top: 10px; }
 .input-with-button { display: flex; }
 .input-with-button input { border-top-right-radius: 0; border-bottom-right-radius: 0; min-width: 0; }
 .icon-toggle { flex: none; width: 42px; border: 1px solid var(--border-strong); border-left: 0; background: var(--surface-3); color: var(--text-muted); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; display: grid; place-items: center; }

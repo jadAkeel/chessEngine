@@ -1,6 +1,9 @@
 import React, { useId, useState } from 'react'
 import { CheckCircle2, ChevronDown, Eye, EyeOff, Loader2, PlugZap, XCircle } from 'lucide-react'
-import { PROVIDERS, endpointPreview, playerProblems, providerInfo } from '../lib/providers.js'
+import {
+  PROVIDERS, SETTINGS_PRESETS, applySettingsPreset, endpointPreview, normalizedTemperature,
+  playerProblems, providerInfo, selectedSettingsPreset,
+} from '../lib/providers.js'
 
 const REASONING = [
   { value: 'default', label: 'Provider default' },
@@ -41,6 +44,15 @@ export default function PlayerSetup({ model, colorNote, player, onChange, onVeri
   const open = !locked || expanded
   const preview = endpointPreview(player)
   const testing = verification?.state === 'testing'
+  const presetName = selectedSettingsPreset(player)
+  const preset = SETTINGS_PRESETS.find(item => item.value === presetName)
+  const anthropic = ['anthropic', 'anthropic_compatible'].includes(info.protocol)
+  const gemini3 = info.protocol === 'gemini' && /^gemini-3/i.test(player.model.trim())
+  const temperatureHint = gemini3
+    ? <>Google recommends the provider default (1.0) for Gemini 3. <a href="https://ai.google.dev/gemini-api/docs/gemini-3?hl=en" target="_blank" rel="noreferrer">Provider guidance</a>.</>
+    : anthropic
+      ? 'Leave blank for widest compatibility. With thinking enabled, only blank or 1 is supported; newer models may only accept the default.'
+      : 'Blank uses the provider default. Lower values usually vary less; some reasoning models reject custom temperature.'
 
   return (
     <section className={`setup-card model-${model.toLowerCase()}`} aria-labelledby={id('title')}>
@@ -55,7 +67,7 @@ export default function PlayerSetup({ model, colorNote, player, onChange, onVeri
 
       {locked && (
         <div className="locked-row">
-          <span>{info.label} · reasoning {player.reasoning} · {player.max_tokens} tokens · {player.timeout_seconds}s timeout</span>
+          <span>{info.label} · reasoning {player.reasoning} · temperature {normalizedTemperature(player) ?? 'default'} · {player.max_tokens} tokens · {player.timeout_seconds}s timeout</span>
           <button type="button" className="text-button" aria-expanded={expanded} aria-controls={id('fields')} onClick={() => setExpanded(value => !value)}>
             {expanded ? 'Hide settings' : 'Show settings'} <ChevronDown size={14} className={expanded ? 'flip' : ''} aria-hidden="true" />
           </button>
@@ -115,15 +127,27 @@ export default function PlayerSetup({ model, colorNote, player, onChange, onVeri
             </p>
           )}
 
+          <Field id={id('preset')} label="Starting preset" hint={preset ? `${preset.max_tokens.toLocaleString()} output tokens · ${preset.timeout_seconds}s per call. ${preset.description}` : 'Choose a starting point or adjust advanced settings. Presets leave reasoning and temperature at the provider default.'} full>
+            <select id={id('preset')} value={presetName} disabled={locked} aria-describedby={`${id('preset')}-hint`} onChange={event => onChange(applySettingsPreset(player, event.target.value))}>
+              <option value="custom" disabled>Custom settings</option>
+              {SETTINGS_PRESETS.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
+            </select>
+          </Field>
+
           <details className="advanced full">
-            <summary>Advanced · reasoning, token limit, timeout</summary>
+            <summary>Advanced · reasoning, temperature, token limit, timeout</summary>
             <div className="form-grid inner">
               <Field id={id('reasoning')} label="Reasoning effort" hint={player.reasoning === 'default' ? 'Nothing extra is sent; some models then reason by default and others do not.' : `Sent as ${info.reasoningField}. Not every model accepts it.`}>
                 <select id={id('reasoning')} value={player.reasoning} disabled={locked} aria-describedby={`${id('reasoning')}-hint`} onChange={event => update('reasoning', event.target.value)}>
                   {REASONING.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
                 </select>
               </Field>
-              <Field id={id('max_tokens')} label="Max output tokens" error={errorFor('max_tokens')} hint="256–64000 per move, reasoning included. Some providers cap it lower; lower it if they return HTTP 400.">
+              <Field id={id('temperature')} label="Temperature (optional)" error={errorFor('temperature')} hint={temperatureHint}>
+                <input id={id('temperature')} type="number" inputMode="decimal" min="0" max={anthropic ? '1' : '2'} step="any" value={player.temperature ?? ''} disabled={locked} placeholder="Provider default"
+                  aria-invalid={!!errorFor('temperature')} aria-describedby={describedBy('temperature')}
+                  onChange={event => update('temperature', event.target.value)} onBlur={() => touch('temperature')} />
+              </Field>
+              <Field id={id('max_tokens')} label="Max output tokens" error={errorFor('max_tokens')} hint="256–64000 per provider request, reasoning included. A cap, not guaranteed usage or a whole-match budget. Provider limits may be lower.">
                 <input id={id('max_tokens')} type="number" inputMode="numeric" min="256" max="64000" step="1" value={player.max_tokens} disabled={locked}
                   aria-invalid={!!errorFor('max_tokens')} aria-describedby={describedBy('max_tokens')}
                   onChange={event => update('max_tokens', event.target.value)} onBlur={() => touch('max_tokens')} />
@@ -142,6 +166,7 @@ export default function PlayerSetup({ model, colorNote, player, onChange, onVeri
                   </select>
                 </Field>
               )}
+              <p className="fine-print full">Input tokens come from the complete board, legal moves and game history sent on each turn. Both models receive the same board format and complete history. Token counts vary by tokenizer; reported input and output usage appears with each move. Connection tests and retries are separate billable requests.</p>
             </div>
           </details>
 
