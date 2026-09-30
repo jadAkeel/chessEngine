@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -347,6 +348,14 @@ def _autosave_kaggle(
         print(result.stdout, flush=True)
 
 
+def _cosine_lr(lr_start: float, lr_final: float, elapsed_sec: float, budget_hours: float) -> float:
+    """Cosine decay from lr_start to lr_final over the wall-clock training budget."""
+    if budget_hours <= 0:
+        return float(lr_start)
+    progress = min(1.0, max(0.0, elapsed_sec / (budget_hours * 3600.0)))
+    return float(lr_final + (lr_start - lr_final) * 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+
 def _fits_time_budget(elapsed_sec: float, slowest_iteration_sec: float, budget_hours: float) -> bool:
     """Whether one more iteration (as slow as the slowest so far) ends inside the budget.
 
@@ -364,6 +373,7 @@ def _train_one_iteration(
     base_model: str | None,
     env: dict[str, str],
     iteration: int,
+    lr_override: float | None = None,
 ) -> None:
     cmd = [
         _resolve_python(),
@@ -387,6 +397,8 @@ def _train_one_iteration(
         cmd.extend(["--max-val-samples", str(args.max_val_samples)])
     if args.train_steps is not None:
         cmd.extend(["--train-steps", str(args.train_steps)])
+    if lr_override is not None:
+        cmd.extend(["--lr-override", f"{lr_override:.10g}"])
 
     _run(cmd, cwd=_backend_dir(), env=env)
 
@@ -433,6 +445,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kaggle-dataset-title", default=None)
     parser.add_argument("--delete-old-versions", action="store_true")
     parser.add_argument("--lr", type=float, default=None, help="Override training.lr")
+    parser.add_argument(
+        "--lr-final", type=float, default=None,
+        help="With --lr and --time-budget-hours: cosine-decay the LR to this value over the budget",
+    )
     parser.add_argument("--no-amp", action="store_true", help="Train in fp32 (no fp16 autocast)")
     parser.add_argument(
         "--time-budget-hours", type=float, default=0.0,
@@ -486,7 +502,11 @@ def main() -> None:
             break
         print(f"[LOOP] iteration {iteration}/{args.iterations}", flush=True)
         iteration_start = time.monotonic()
-        _train_one_iteration(args, config_path, base_model, env, iteration)
+        lr_override = None
+        if args.lr_final is not None and args.lr is not None:
+            lr_override = _cosine_lr(args.lr, args.lr_final, time.monotonic() - started, args.time_budget_hours)
+            print(f"[LR] iteration {iteration}: {lr_override:.3g}", flush=True)
+        _train_one_iteration(args, config_path, base_model, env, iteration, lr_override)
 
         if args.autosave != "off" and iteration % int(args.autosave_every) == 0:
             if args.autosave in {"local", "both"}:

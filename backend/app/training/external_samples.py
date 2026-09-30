@@ -81,6 +81,18 @@ def _build_policy(idx: int, *, soft_policy: bool = False, rng: np.random.Generat
     )
 
 
+def _multi_move_policy(indices: np.ndarray, probs: np.ndarray, fallback_idx: int) -> PackedPolicy:
+    """Policy over several scored moves; padded slots have index -1."""
+    keep = (indices >= 0) & (indices < NUM_MOVES) & np.isfinite(probs) & (probs > 0)
+    if int(keep.sum()) < 2:
+        return _build_policy(fallback_idx)
+    kept = probs[keep].astype(np.float64)
+    return PackedPolicy(
+        indices=indices[keep].astype(np.uint16),
+        probs=(kept / kept.sum()).astype(np.float16),
+    )
+
+
 def _decoded_fullmove_number(state: np.ndarray, cfg: AppConfig) -> int:
     max_fullmove = max(1, int(getattr(cfg.system, "max_fullmove", 1)))
     encoded = float(state[FULLMOVE_NUMBER_PLANE, 0, 0])
@@ -151,6 +163,15 @@ def load_external_samples_with_stats(
             "External sample arrays must have matching first dimension: "
             f"states={len(states)} policy_indices={len(policy_indices)} values={len(values)}"
         )
+    # Optional multi-move targets (e.g. several engine-scored moves per position).
+    topk_indices = topk_probs = None
+    if 'policy_topk_indices' in data and 'policy_topk_probs' in data:
+        topk_indices = np.asarray(data['policy_topk_indices'], dtype=np.int32)
+        topk_probs = np.asarray(data['policy_topk_probs'], dtype=np.float32)
+        if topk_indices.shape != topk_probs.shape or topk_indices.shape[0] != len(states):
+            raise ValueError(
+                f"policy_topk arrays must share shape (N, K); got {topk_indices.shape} and {topk_probs.shape}"
+            )
 
     total_raw = len(states)
     print(f"[LOAD] raw samples={total_raw}")
@@ -220,7 +241,10 @@ def load_external_samples_with_stats(
                 continue
             seen_hashes.add(h)
 
-        policy = _build_policy(idx)
+        if topk_indices is None:
+            policy = _build_policy(idx)
+        else:
+            policy = _multi_move_policy(topk_indices[idx_i], topk_probs[idx_i], idx)
         samples.append((state, policy, value))
         stats["accepted"] += 1
         if max_samples > 0 and len(samples) >= max_samples:

@@ -108,7 +108,7 @@ def _run_main_with_failing_upload(monkeypatch, tmp_path: Path, autosave: str) ->
     import scripts.kaggle_train_external as kte
 
     trained = []
-    monkeypatch.setattr(kte, "_train_one_iteration", lambda args, cfg, base, env, it: trained.append(it))
+    monkeypatch.setattr(kte, "_train_one_iteration", lambda args, cfg, base, env, it, lr=None: trained.append(it))
     monkeypatch.setattr(kte, "_autosave_local", lambda *a, **k: None)
 
     def failing_upload(*args, **kwargs):

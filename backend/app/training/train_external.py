@@ -42,6 +42,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--max-val-samples', type=int, default=None)
     parser.add_argument('--train-steps', type=int, default=None)
     parser.add_argument('--no-save', action='store_true')
+    parser.add_argument('--lr-override', type=float, default=None,
+                        help='Set every param group to this learning rate after restoring')
     return parser
 
 
@@ -153,6 +155,12 @@ def main() -> None:
         global_step = int(restored['global_step'])
     elif args.resume:
         raise FileNotFoundError(latest_ckpt)
+    if args.lr_override is not None:
+        # A restored optimizer keeps its saved LR; the Kaggle wrapper sets a
+        # per-iteration schedule through this flag.
+        for group in optimizer.param_groups:
+            group['lr'] = float(args.lr_override)
+        logger.info("[LR] override -> %.3g", float(args.lr_override))
 
     # ======================================
     # 🔁 ITERATIONS LOOP (UNCHANGED LOGIC)
