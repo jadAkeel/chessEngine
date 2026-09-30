@@ -2,6 +2,18 @@
 
 The public release runs the frontend and API in one Docker web service. Visitors enter their own provider keys. No shared model key, account system, database, or parent chess-engine files are required.
 
+## Published preview
+
+- Public URL: [Chess Model Challenge](https://chess-model-challenge-preview.onrender.com)
+- Service: [Render dashboard](https://dashboard.render.com/web/srv-dauhf7h42hec73f35640)
+- Published: 2026-09-30, Free preview plan.
+- Deployed application commit: `c6ee2a3395f3843e8d56f714e550315ee155b0df`.
+- [Release workflow](https://github.com/jadAkeel/chessEngine/actions/runs/36726506057): frontend/backend checks, Linux image build and container smoke check passed.
+
+The public URL passed browser checks for the desktop/mobile UI, sample isolation, reload, health, security headers and private-provider URL rejection. No model inference calls were made during the public smoke check. Local verification passed 41 backend tests, 12 frontend tests and 11 browser journeys with scripted providers.
+
+The paid template is ready but has not been provisioned. Render reported `need_payment_info` when validating it against the account. Moving to an always-on paid plan requires the operator's cost approval and payment information.
+
 ## Release configuration
 
 - Repository: `https://github.com/jadAkeel/chessEngine`
